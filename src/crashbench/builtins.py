@@ -2,6 +2,7 @@
 import operator
 import itertools
 import functools
+from typing import Iterable
 
 def zip_repeat(data):
     max_length = max(len(sublist) for sublist in data)
@@ -21,7 +22,12 @@ def foldr(func, acc, xs):
     return functools.reduce(flip(func), reversed(xs), acc)
 
 def var(*args):
-    yield from args
+    if len(args) == 1:
+        if isinstance(args[0], Iterable) and not isinstance(args[0], str):
+            # force generator evaluation
+            return list(args[0])
+        return args[0]
+    return [*args]
 
 def prefix_each(text, iterable):
     for element in iterable:
@@ -30,6 +36,13 @@ def prefix_each(text, iterable):
 def suffix_each(text, iterable):
     for element in iterable:
         yield f"{element}{text}"
+
+def make_list(*args):
+    return [*args]
+
+def conditional(condition, true_branch, false_branch):
+    return true_branch if condition else false_branch
+
 
 BUILTINS = {
 # builtins
@@ -106,11 +119,12 @@ BUILTINS = {
 
     'str': str,
     'int': int,
-    'list': list,
+    'list': make_list,
     'float': float,
     'bool': bool,
 
     'join': str.join,
     'prefix_each': prefix_each,
-    'suffix_each': suffix_each
+    'suffix_each': suffix_each,
+    'if': conditional
 }

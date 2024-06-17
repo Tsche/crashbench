@@ -1,8 +1,10 @@
+from dataclasses import dataclass
+from functools import cached_property
 from pprint import pprint
 from pathlib import Path
 from itertools import product
 from glob import glob
-from typing import Any
+from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Node
 
@@ -17,148 +19,356 @@ QUERY = {
 }
 
 
-def parse_arguments(node: Node):
-    for child in node.named_children:
-        if child.type != "comment":
-            yield parse_constant(child)
+@runtime_checkable
+class Unevaluated(Protocol):
+    def evaluate(self, scope: "Scope"): ...
+
 
 class PendingCall:
     def __init__(self, fnc, *arguments):
         self.fnc = fnc
         self.arguments = arguments
 
-    def evaluate_args(self):
+        self.value = None
+
+    def evaluate_args(self, scope: "Scope"):
         for argument in self.arguments:
-            if isinstance(argument, PendingCall):
-                yield argument()
+            if isinstance(argument, Unevaluated):
+                yield argument.evaluate(scope)
             else:
                 yield argument
 
-    def __call__(self):
-        return self.fnc(*list(self.evaluate_args()))
+    def evaluate(self, scope: "Scope"):
+        if self.value is None:
+            # evaluate only once, recall afterwards
+            self.value = self.fnc(*list(self.evaluate_args(scope)))
+            # if isinstance(self.value, Iterable) and not isinstance(self.value, str):
+            #     # force evaluation of generators
+            #     self.value = list(self.value)
+
+        return self.value
 
     def __repr__(self):
-        return f"{self.fnc.__name__}({','.join(str(argument) for argument in self.arguments)})"
-
-def parse_call(node: Node):
-    name_node = node.child_by_field_name("function")
-    name = name_node.text.decode()
-    if name not in BUILTINS:
-        print("ERR: invalid function called")
-        return
-
-    arguments = list(parse_arguments(node.child_by_field_name("arguments")))
-    return PendingCall(BUILTINS[name], *arguments)
+        return f"{self.fnc.__name__}({', '.join(str(argument) for argument in self.arguments)})"
 
 
-def parse_constant(node: Node):
-    match node.type:
-        case "string_literal":
-            assert node.named_child_count == 1
-            return node.named_children[0].text.decode()
-        case "number_literal":
-            # TODO integer literal suffixes
-            # TODO hex, octal, binary literals
-            # TODO separators
-            text = node.text.decode()
-            try:
-                if "." in text:
-                    return float(text)
-                return int(text)
-            except ValueError:
-                return text
-        case "char_literal":
-            assert node.named_child_count == 1
-            return node.named_children[0].text.decode()
-        case "concatenated_string":
-            return "".join(parse_constant(child) for child in node.named_children)
-        case "true":
-            return True
-        case "false":
-            return False
-        case "null":
-            return None
-        case "call_expression":
-            # TODO when and how is this evaluated?
-            # should var(range(0,2), range(0,3)) expand to `"0,1", "0,1,2"`?
-            return parse_call(node)
-        case "identifier":
-            ident = node.text.decode()
-            if ident in BUILTINS:
-                return BUILTINS[ident]
-            # TODO variables
-            raise ValueError(f"Could not resolve identifier {ident}")
-
-
-class Variable(PendingCall):
-    def __init__(self, name: str, generator: str, arguments):
-        if generator not in BUILTINS:
-            raise ValueError(f"Builtin {generator} not recognized")
-
+class Variable:
+    def __init__(self, name: str):
         self.name = name
-        super().__init__(BUILTINS[generator], *list(parse_arguments(arguments)))
 
-    def __call__(self):
-        return [f'-D{self.name}={value}' for value in super().__call__()]
+    @property
+    def __name__(self):
+        return self.name
 
     def __repr__(self):
-        return f"{self.name}={super().__repr__()}"
+        return self.name
 
-class VariableGroup(list[Variable]):
-    def __call__(self):
-        data = [generator() for generator in self]
-        max_length = max(len(sublist) for sublist in data)
-        return [[sublist[idx % len(sublist)] for sublist in data] for idx in range(max_length)]
+    def evaluate(self, scope: "Scope"):
+        return scope.evaluate_variable(self.name)
 
 
-def find_variables(tree):
-    for _, node in QUERY["attribute"].matches(tree):
-        assert (
-            len(node["name"])
-            == len(node["generator"])
-            == len(node["arguments"])
-        )
-        count = len(node["name"])
-        position = node["variable"].start_byte, node["variable"].end_byte
-        if count > 1:
-            yield position, VariableGroup([
-                Variable(
-                    node["name"][idx].text.decode(),
-                    node["generator"][idx].text.decode(),
-                    node["arguments"][idx],
+class Setting:
+    def __init__(self, name: str, args: Node): ...
+
+
+class Scope:
+    def __init__(self, parent: Optional["Scope"] = None):
+        self.parent = parent
+
+        self.settings: dict[str, Any] = {}
+        self.variables: dict[str, Any] = {}
+        self.functions: dict[str, Lambda] = {}
+        self.used: set[str] = set()
+
+    def parse_argument_list(self, node: Node):
+        for child in node.named_children:
+            if child.type != "comment":
+                yield self.parse_argument(child)
+
+    def parse_argument(self, node: Node):
+        match node.type:
+            case "string_literal":
+                assert node.named_child_count == 1
+                return node.named_children[0].text.decode()
+            case "number_literal":
+                # TODO integer literal suffixes
+                # TODO hex, octal, binary literals
+                # TODO separators
+                text = node.text.decode()
+                try:
+                    return float(text) if "." in text else int(text)
+                except ValueError:
+                    return text
+            case "char_literal":
+                assert node.named_child_count == 1
+                return node.named_children[0].text.decode()
+            case "concatenated_string":
+                return "".join(
+                    self.parse_argument(child) for child in node.named_children
                 )
-                for idx in range(len(node["name"]))
-            ])
+            case "true":
+                return True
+            case "false":
+                return False
+            case "null":
+                return None
+            case "call_expression":
+                name_node = node.child_by_field_name("function")
+                name = name_node.text.decode()
+                arguments = list(
+                    self.parse_argument_list(node.child_by_field_name("arguments"))
+                )
+                function = self.get_function(name)
+                assert function is not None, f"No function {name} found"
+                return PendingCall(function, *arguments)
 
+            case "identifier":
+                ident = node.text.decode()
+                if fnc := self.get_function(ident):
+                    # evaluate functions right away
+                    return fnc
+
+                return Variable(ident)
+            case _:
+                raise ValueError(f"Unexpected node type {node.type}")
+
+    def parse_attr_node(self, node: Node):
+        assert node.type == "attributed_statement", f"Wrong type: {node.type}"
+        assert node.named_children[-1].type in (
+            "expression_statement",
+            "labeled_statement",
+        ), f"Wrong type: {node.named_children[-1].type}"
+
+        remove = False
+
+        if node.named_children[-1].type == "expression_statement":
+            # regular attribute
+            if node.named_child_count == 2:
+                # only one attribute => independent
+                remove |= self.parse_attribute(node.named_children[0].named_children[0])
+            else:
+                # dependent attributes
+                # TODO reuse VariableGroup pattern
+                for child in node.named_children[:-1]:
+                    assert child.type == "attribute_declaration"
+                    remove |= self.parse_attribute(child.named_children[0])
+        elif node.named_children[-1].type == "labeled_statement":
+            # attribute using
+            assert (
+                node.has_error
+            ), "Node doesn't have an error. Did tree-sitter-cpp get fixed?"
+
+            for _, match in QUERY["using_attr"].matches(node):
+                assert "using" in match
+                assert "name" in match
+                name = match["name"].text.decode()
+
+                if "value" in match:
+                    # print(f"{match['name'].text.decode()} = {match['value'].text.decode()}")
+                    self.add_variable(name, self.parse_argument(match["value"]))
+                    remove |= True
+                elif "function" in match:
+                    self.add_function(name, Lambda(name, match["function"], self))
+                    remove |= True
+                    # print(f"{match['name'].text.decode()} = {match['function'].text.decode()}")
+                # print(match)
+            # print(node)
+        return remove
+
+    def parse_attribute(self, node: Node):
+        assert node.type == "attribute", f"Wrong type: {node.type}"
+
+        if node.named_children[-1].type != "argument_list":
+            # no args, currently not used
+            return False
+        args = node.named_children[-1]
+        name = node.child_by_field_name("name").text.decode()
+
+        if prefix := node.child_by_field_name("prefix"):
+            # metavar
+            varname = prefix.text.decode()
+            if name not in BUILTINS and name not in self.functions:
+                print(f"skipped {varname}: {name} is not a known function or builtin")
+                return False
+
+            arguments = list(self.parse_argument_list(args))
+            if name == "var" and len(arguments) == 1:
+                # special case var(x) with arity of one
+                self.add_variable(varname, arguments[0])
+                return True
+
+            self.add_variable(varname, PendingCall(self.get_function(name), *arguments))
         else:
-            yield position, Variable(
-                node["name"][0].text.decode(),
-                node["generator"][0].text.decode(),
-                node["arguments"][0],
+            # setting
+            if name == "use":
+                self.parse_use(args)
+
+            # TODO check if name matches a known setting
+            self.settings[name] = Setting(name, args)
+        return True
+
+    def parse_use(self, args: Node):
+        arguments = list(self.parse_argument_list(args))
+        for variable in arguments:
+            assert isinstance(
+                variable, Variable
+            ), f"Wrong argument type. All args must be variables"
+            self.set_used(variable.name)
+
+    def set_used(self, variable: str):
+        assert variable is not None
+        assert self.get_variable(
+            variable
+        ), f"Unrecognized variable {variable} marked used"
+
+        self.used.add(variable)
+
+    def add_variable(self, variable: str, value: Any):
+        assert variable not in self.variables, f"Overwriting variable {variable}"
+        self.variables[variable] = value
+
+    def add_function(self, function: str, value: Any):
+        self.functions[function] = value
+
+    def get_function(self, function: str):
+        if function in BUILTINS:
+            return BUILTINS[function]
+
+        if function in self.functions:
+            return self.functions[function]
+
+        if self.parent:
+            return self.parent.get_function(function)
+
+    def get_variable(self, variable: str):
+        if value := self.variables.get(variable, None):
+            return value
+
+        if self.parent is not None:
+            return self.parent.get_variable(variable)
+
+    def evaluate_variable(self, variable: str | Unevaluated):
+        if isinstance(variable, Unevaluated):
+            return (
+                variable.evaluate(self)
+                if isinstance(variable, Unevaluated)
+                else variable
             )
 
-class Test:
-    def __init__(self, node: dict[str, Node]):
+        if (value := self.variables.get(variable, None)) is not None:
+            return value.evaluate(self) if isinstance(value, Unevaluated) else value
+
+        if self.parent is not None:
+            return self.parent.evaluate_variable(variable)
+
+    def add_setting(self, setting: str, value: Any):
+        # it's okay to overwrite settings
+        self.settings[setting] = value
+
+
+class Lambda:
+    def __init__(self, name: str, node: Node, scope: Scope):
+        self.name = name
+        *args, function = list(self.parse_nested_comma(node))
+        self.arg_names = args
+
+        parse_scope = Scope(scope)
+        parse_scope.add_function(name, self)
+
+        self.function = scope.parse_argument(function)
+        self.scope = scope
+        assert isinstance(self.function, Unevaluated)
+
+    def parse_nested_comma(self, node: Node):
+        assert node.type == "comma_expression"
+        left = node.child_by_field_name("left")
+        assert left.type == "identifier", "Expected an identifier"
+        yield left.text.decode()
+
+        right = node.child_by_field_name("right")
+        if right.type == "comma_expression":
+            yield from self.parse_nested_comma(right)
+        else:
+            yield right
+
+    @property
+    def __name__(self):
+        return str(self.function)
+
+    @property
+    def definition(self):
+        return f"{self.name} {', '.join(self.arg_names)} = {self.function!s}"
+
+    def __repr__(self):
+        return self.name
+
+    def __call__(self, *args):
+        assert (
+            len(args) == len(self.arg_names)
+        ), f"Invalid amount of arguments given, expected {len(self.arg_names)}, got {len(args)}"
+        function_scope = Scope(self.scope)
+        # function_scope.add_function(self.name, self)
+        for name, value in zip(self.arg_names, args):
+            function_scope.add_variable(name, value)
+
+        return self.function.evaluate(function_scope)
+
+
+@dataclass
+class Range:
+    start_byte: int
+    end_byte: int
+
+    def __contains__(self, element):
+        assert self.end_byte > self.start_byte, "Invalid range"
+        return self.start_byte <= element <= self.end_byte
+
+
+class SkipList(list[Range]):
+    def __contains__(self, element):
+        return any(element in value for value in self)
+
+
+class Test(Scope):
+    def __init__(self, node: dict[str, Node], parent: Optional[Scope] = None):
+        super().__init__(parent)
         self.kind = node["kind"].text.decode()
         assert self.kind in ("benchmark", "test")
 
-        self.name = node["name"].text.decode()
-
-        self.start_byte = node["attributes"].start_byte
+        self.name = node["test_name"].text.decode()
+        self.head = node["test_head"]
+        self.start_byte = node["test_head"].start_byte
         self.end_byte = node["code"].end_byte
         self.node = node
-        self.variables = dict(find_variables(node["code"]))
+
+        # note that parse_attr_node has side effects!
+        self.skip_list = SkipList(
+            Range(attr.start_byte, attr.end_byte)
+            for attr in node.get("attr_node", [])
+            if self.parse_attr_node(attr)
+        )
+        self.find_metavar_uses(node["code"])
+
+    def find_metavar_uses(self, node: Node):
+        for _, match in QUERY["identifier"].matches(node):
+            start_byte = match["ident"].start_byte
+            if start_byte in self.skip_list:
+                continue
+
+            ident = match["ident"].text.decode()
+            if self.get_variable(ident) is not None:
+                self.used.add(ident)
 
     @property
     def code(self) -> list[int]:
         code_node: Node = self.node["code"]
         text = b""
         last = 0
-        for start, end in self.variables.keys():
-            text += code_node.text[last:start - code_node.start_byte]
-            last = end - code_node.start_byte
+        for skip in self.skip_list:
+            text += code_node.text[last : skip.start_byte - code_node.start_byte]
+            last = skip.end_byte - code_node.start_byte
 
-            if code_node.text[last] == ord('\n'):
+            if code_node.text[last] == ord("\n"):
                 # remove newline if this was the end of the line
                 last += 1
 
@@ -173,42 +383,201 @@ class Test:
             else:
                 yield var
 
+    @cached_property
+    def evaluated(self) -> dict[str, list[Any]]:
+        variables = {}
+        for name in self.used:
+            variable = self.evaluate_variable(name)
+            if isinstance(variable, Iterable) and not isinstance(variable, str):
+                # force evaluation of generators
+                variables[name] = list(variable)
+                continue
+
+            # convert scalars to lists
+            variables[name] = [variable]
+        return variables
+
     @property
     def runs(self) -> list[list[Any]]:
-        generators = [generator() for generator in self.variables.values()]
-        return [[f'-D{self.name.upper()}', *self.flatten_vars(run)] for run in list(product(*generators))]
+        def expand(name, var):
+            for value in var:
+                yield (name, value)
+
+        expanded = [expand(name, vars) for name, vars in self.evaluated.items()]
+        return list(dict(run) for run in product(*expanded))
+
+class TranslationUnit(Scope):
+    def __init__(self, source_path: Path):
+        super().__init__()
+
+        self.source_path = source_path
+        self.raw_source = source_path.read_bytes()
+        self.tests: list[Test] = []
+
+        parser = Parser(CPP)
+        tree = parser.parse(self.raw_source)
+        self.skip_list: list[Range | Test] = []
+        for _, node in QUERY["test"].matches(tree.root_node):
+            if "kind" in node and "code" in node:
+                # test
+                test = Test(node, self)
+                self.tests.append(test)
+                self.skip_list.append(test)
+            else:
+                # metavar or config
+                if "using" in node or "attr" in node:
+                    for attr in node.get("attr_node", []):
+                        if self.parse_attr_node(attr):
+                            self.skip_list.append(Range(attr.start_byte, attr.end_byte))
+
+    @cached_property
+    def source(self):
+        processed_source = ""
+        last = 0
+        for skip in self.skip_list:
+            processed_source += self.raw_source[last : skip.start_byte].decode()
+            if isinstance(skip, Test):
+                processed_source += f"#ifdef {skip.name.upper()}\n"
+
+                processed_source += skip.code
+                processed_source += "\n"
+                processed_source += "#endif"
+            last = skip.end_byte
+
+        processed_source += self.raw_source[last:].decode()
+        return processed_source
+
+    def parse(self):
+        def stringify_functions(dictionary):
+            return "\n      ".join(fnc.definition for fnc in dictionary.values())
+
+        print("Variables: ")
+        print("  Global:")
+        print(f"    Variables: {self.variables}")
+        print("    Functions: ")
+        if self.functions:
+            print(f"      {stringify_functions(self.functions)}")
+        for test in self.tests:
+            variables = {
+                name: str(variable) for name, variable in test.variables.items()
+            }
+            print(f"  {test.name}:")
+            print(f"    Variables: {variables}")
+            print(f"    Functions:")
+            if test.functions:
+                print(f"      {stringify_functions(test.functions)}")
+            print(f"    Used: {test.used}")
 
 
 def parse(source_path: Path):
-    parser = Parser(CPP)
-    source = source_path.read_bytes()
-    tree_obj = parser.parse(source)
-    tests = [Test(node) for _, node in QUERY["compound"].matches(tree_obj.root_node)]
-    if len(tests) == 0:
-        # no tests discovered
-        return
-
-    processed_source = ''
-    last = 0
-    for test in tests:
-        processed_source += source[last: test.start_byte].decode()
-        processed_source += f"#ifdef {test.name.upper()}\n"
-
-        processed_source += test.code
-        processed_source += '\n'
-        processed_source += "#endif"
-        last = test.end_byte
-
-    processed_source += source[last:].decode()
-    return processed_source, tests
+    source = TranslationUnit(source_path)
+    source.parse()
+    return source.source, source.tests
 
 
-def tree(source: Path, query=None):
+# def parse(source_path: Path):
+#     parser = Parser(CPP)
+#     source = source_path.read_bytes()
+#     tree_obj = parser.parse(source)
+#     tests = [Test(node) for _, node in QUERY["compound"].matches(tree_obj.root_node)]
+#     if len(tests) == 0:
+#         # no tests discovered
+#         return
+
+#     processed_source = ''
+#     last = 0
+#     for test in tests:
+#         processed_source += source[last: test.start_byte].decode()
+#         processed_source += f"#ifdef {test.name.upper()}\n"
+
+#         processed_source += test.code
+#         processed_source += '\n'
+#         processed_source += "#endif"
+#         last = test.end_byte
+
+#     processed_source += source[last:].decode()
+#     return processed_source, tests
+
+
+def print_tree(source: Path, query=None):
     parser = Parser(CPP)
     tree_obj = parser.parse(source.read_bytes())
     if query is None:
-        return tree_obj.root_node
+        print(str(tree_obj.root_node))
     else:
         matches = QUERY[query].matches(tree_obj.root_node)
         print(f"{len(matches)} matches:")
-        return matches
+        pprint(matches)
+
+
+# class Variable(Unevaluated):
+#     def __init__(self, name: str, generator: str, arguments, scope):
+#         if generator not in BUILTINS:
+#             raise ValueError(f"Builtin {generator} not recognized")
+
+#         self.name = name
+#         super().__init__(
+#             BUILTINS[generator], *list(scope.parse_argument_list(arguments))
+#         )
+
+#     def __call__(self):
+#         value = super().__call__()
+#         if isinstance(value, Iterable):
+#             # might be a generator - evaluate
+#             return list(value)
+#         else:
+#             return [value]
+#         # return [f"-D{self.name}={value}" for value in super().__call__()]
+
+#     def __eq__(self, other):
+#         if isinstance(other, Variable):
+#             return self.name == other.name
+#         return self.name == other
+
+#     def __hash__(self):
+#         # variables are indexed by their name
+#         return hash(self.name)
+
+#     def __repr__(self):
+#         return f"{self.name}={super().__repr__()}"
+
+
+# class VariableGroup(list[Variable]):
+#     def __call__(self):
+#         data = [generator() for generator in self]
+#         max_length = max(len(sublist) for sublist in data)
+#         return [
+#             [sublist[idx % len(sublist)] for sublist in data]
+#             for idx in range(max_length)
+#         ]
+
+
+# def find_variables(tree):
+#     for _, node in QUERY["attribute"].matches(tree):
+#         assert len(node["name"]) == len(node["generator"]) == len(node["arguments"])
+#         count = len(node["name"])
+#         position = node["variable"].start_byte, node["variable"].end_byte
+#         if count > 1:
+#             yield (
+#                 position,
+#                 VariableGroup(
+#                     [
+#                         Variable(
+#                             node["name"][idx].text.decode(),
+#                             node["generator"][idx].text.decode(),
+#                             node["arguments"][idx],
+#                         )
+#                         for idx in range(len(node["name"]))
+#                     ]
+#                 ),
+#             )
+
+#         else:
+#             yield (
+#                 position,
+#                 Variable(
+#                     node["name"][0].text.decode(),
+#                     node["generator"][0].text.decode(),
+#                     node["arguments"][0],
+#                 ),
+#             )

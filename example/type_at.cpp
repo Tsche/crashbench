@@ -1,3 +1,4 @@
+/*
 #include <concepts>
 #include <cstddef>
 #include <type_traits>
@@ -67,8 +68,8 @@ using get = decltype(GetImpl<Idx>{}(static_cast<Ts *>(0)...));
 namespace ignored {
 struct Universal {
   constexpr Universal() = default;
-  constexpr Universal(auto &&) {}
-  constexpr Universal &operator=(auto &&) { return *this; }
+  constexpr Universal(auto&&) {}
+  constexpr Universal& operator=(auto&&) { return *this; }
 };
 
 template <std::size_t N, typename = std::make_index_sequence<N>> struct GetImpl;
@@ -76,7 +77,7 @@ template <std::size_t N, typename = std::make_index_sequence<N>> struct GetImpl;
 template <std::size_t N, std::size_t... Skip>
 struct GetImpl<N, std::index_sequence<Skip...>> {
   template <typename T>
-  auto operator()(decltype(Universal{Skip})..., T &&, auto &&...) -> T;
+  auto operator()(decltype(Universal{Skip})..., T&&, auto&&...) -> T;
 };
 
 template <std::size_t Idx, typename... Ts>
@@ -266,6 +267,8 @@ namespace builtin {
 template <std::size_t Idx, typename... Ts>
 using get = __type_pack_element<Idx, Ts...>;
 } // namespace builtin
+#else
+#error "No pack index builtin detected"
 #endif
 
 // namespace cpp26 {
@@ -278,12 +281,11 @@ template <template <std::size_t, typename...> class getter, std::size_t... Idx>
 void run(std::index_sequence<Idx...>) {
   static_assert((std::same_as<getter<Idx, Dummy<Idx>...>, Dummy<Idx>> && ...));
 }
-
+*/
 int main() {
   [[benchmark("type_at")]] {
-    [[STRATEGY::var("recursive", "inheritance1", "inheritance2", "voidptr",
-                    "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
-    [[COUNT::range(0, 255, 100)]];
+    [[STRATEGY::var("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
+    [[COUNT::range(0, 2)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});
   }

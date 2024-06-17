@@ -2,3 +2,4 @@ colorama~=0.4.6
 click~=8.1.7
 tree-sitter~=0.22.3
 tree-sitter-cpp~=0.22.2
+psutil~=5.9.8
