@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, TypeAlias, TypeVar
 
 from .sysinfo import SYSTEM_INFO, SYSTEM_INFO_HASH, SystemInfoHash
@@ -47,6 +48,7 @@ class Test:
 
 @dataclass
 class Report:
+    file: Path
     system: dict[str, str | int] =  field(default_factory=SYSTEM_INFO)
     compilers: HashedDict[Compiler] = field(default_factory=HashedDict)
     tests: list[Test] = field(default_factory=list)
@@ -55,6 +57,12 @@ class Report:
         hash_value = fnv1a(compiler)
         if hash_value not in self.compilers:
             self.compilers[hash_value] = compiler
+
+@dataclass
+class Commit:
+    commit_id: str
+    results: list[Report]
+
 
 # if __name__ == "__main__":
 #     compilers = HashedDict()

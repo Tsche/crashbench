@@ -3,7 +3,6 @@ from functools import cached_property
 from pprint import pprint
 from pathlib import Path
 from itertools import product
-from glob import glob
 from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Node
@@ -23,7 +22,6 @@ QUERY = {
 class Unevaluated(Protocol):
     def evaluate(self, scope: "Scope"): ...
 
-
 class PendingCall:
     def __init__(self, fnc, *arguments):
         self.fnc = fnc
@@ -42,9 +40,6 @@ class PendingCall:
         if self.value is None:
             # evaluate only once, recall afterwards
             self.value = self.fnc(*list(self.evaluate_args(scope)))
-            # if isinstance(self.value, Iterable) and not isinstance(self.value, str):
-            #     # force evaluation of generators
-            #     self.value = list(self.value)
 
         return self.value
 
@@ -475,30 +470,6 @@ def parse(source_path: Path):
     return source.source, source.tests
 
 
-# def parse(source_path: Path):
-#     parser = Parser(CPP)
-#     source = source_path.read_bytes()
-#     tree_obj = parser.parse(source)
-#     tests = [Test(node) for _, node in QUERY["compound"].matches(tree_obj.root_node)]
-#     if len(tests) == 0:
-#         # no tests discovered
-#         return
-
-#     processed_source = ''
-#     last = 0
-#     for test in tests:
-#         processed_source += source[last: test.start_byte].decode()
-#         processed_source += f"#ifdef {test.name.upper()}\n"
-
-#         processed_source += test.code
-#         processed_source += '\n'
-#         processed_source += "#endif"
-#         last = test.end_byte
-
-#     processed_source += source[last:].decode()
-#     return processed_source, tests
-
-
 def print_tree(source: Path, query=None):
     parser = Parser(CPP)
     tree_obj = parser.parse(source.read_bytes())
@@ -508,76 +479,3 @@ def print_tree(source: Path, query=None):
         matches = QUERY[query].matches(tree_obj.root_node)
         print(f"{len(matches)} matches:")
         pprint(matches)
-
-
-# class Variable(Unevaluated):
-#     def __init__(self, name: str, generator: str, arguments, scope):
-#         if generator not in BUILTINS:
-#             raise ValueError(f"Builtin {generator} not recognized")
-
-#         self.name = name
-#         super().__init__(
-#             BUILTINS[generator], *list(scope.parse_argument_list(arguments))
-#         )
-
-#     def __call__(self):
-#         value = super().__call__()
-#         if isinstance(value, Iterable):
-#             # might be a generator - evaluate
-#             return list(value)
-#         else:
-#             return [value]
-#         # return [f"-D{self.name}={value}" for value in super().__call__()]
-
-#     def __eq__(self, other):
-#         if isinstance(other, Variable):
-#             return self.name == other.name
-#         return self.name == other
-
-#     def __hash__(self):
-#         # variables are indexed by their name
-#         return hash(self.name)
-
-#     def __repr__(self):
-#         return f"{self.name}={super().__repr__()}"
-
-
-# class VariableGroup(list[Variable]):
-#     def __call__(self):
-#         data = [generator() for generator in self]
-#         max_length = max(len(sublist) for sublist in data)
-#         return [
-#             [sublist[idx % len(sublist)] for sublist in data]
-#             for idx in range(max_length)
-#         ]
-
-
-# def find_variables(tree):
-#     for _, node in QUERY["attribute"].matches(tree):
-#         assert len(node["name"]) == len(node["generator"]) == len(node["arguments"])
-#         count = len(node["name"])
-#         position = node["variable"].start_byte, node["variable"].end_byte
-#         if count > 1:
-#             yield (
-#                 position,
-#                 VariableGroup(
-#                     [
-#                         Variable(
-#                             node["name"][idx].text.decode(),
-#                             node["generator"][idx].text.decode(),
-#                             node["arguments"][idx],
-#                         )
-#                         for idx in range(len(node["name"]))
-#                     ]
-#                 ),
-#             )
-
-#         else:
-#             yield (
-#                 position,
-#                 Variable(
-#                     node["name"][0].text.decode(),
-#                     node["generator"][0].text.decode(),
-#                     node["arguments"][0],
-#                 ),
-#             )
