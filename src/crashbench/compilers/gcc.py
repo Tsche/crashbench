@@ -24,6 +24,7 @@ class GCC(Compiler):
 
     def __init__(self, path: Path, cpp_driver: Optional[Path] = None):
         super().__init__(path)
+        self.cpp_driver = cpp_driver
 
     @classmethod
     def get_compiler_info(cls, compiler: Path) -> dict[str, str]:
