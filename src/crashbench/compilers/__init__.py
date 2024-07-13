@@ -1,21 +1,39 @@
 import platform
 
 from .compiler import Compiler
-from .clang import Clang
-from .gcc import GCC
 
-compilers = [Clang, GCC]
-__all__ = ['Compiler', 'Clang', 'GCC']
-if platform.system() == 'Windows':
-    from .msvc import MSVC
-    compilers.append(MSVC)
-    __all__.append('MSVC')
+compilers = []
+__all__ = ["Compiler"]
+
+match platform.system():
+    case "Linux":
+        from .clang import Clang
+        from .gcc import GCC
+
+        compilers = [Clang, GCC]
+        __all__.extend(["Clang", "GCC"])
+
+    case "Windows":
+        from .clang import Clang
+        from .gcc import GCC
+        from .msvc import MSVC
+
+        compilers = [Clang, GCC, MSVC]
+        __all__.extend(["Clang", "GCC", "MSVC"])
+
+    case "Darwin":
+        from .clang import Clang
+
+        compilers = [Clang]
+        __all__.extend(["Clang"])
+
 
 def discover():
     for compiler in compilers:
         yield from compiler.discover()
 
-'''
+
+"""
 SARIF:
 
 clang >=16
@@ -28,4 +46,4 @@ gcc >=13
 
 msvc
 /experimental:log{file_stem}
-'''
+"""

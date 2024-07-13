@@ -1,104 +1,118 @@
 from dataclasses import asdict
-import os
-import time
+import logging
 from pathlib import Path
-from pprint import pprint
-from subprocess import check_call
 from typing import Iterable, Optional
 
 import click
 
-from .parser import parse, print_tree
+from .runner import Runner
+from .parser import TranslationUnit, parse, print_tree
 from .sysinfo import SYSTEM_INFO
+from .compilers import discover, Compiler
 
-def generate_trace(file, output, arguments: list[str]):
-    includes = [
-        # '-isystem', str(Path.cwd() / 'include')
-    ]
+# def generate_trace(file, output, arguments: list[str]):
+#     includes = [
+#         # '-isystem', str(Path.cwd() / 'include')
+#     ]
 
-    standard = "-std=c++2c"
-    profile_flags = [
-        # '-ftime-trace',
-        "-c"
-    ]
+#     standard = "-std=c++2c"
+#     profile_flags = [
+#         # '-ftime-trace',
+#         "-c"
+#     ]
 
-    taskset_prefix = ["taskset", "--cpu-list", "23"]
-    call = [
-        *taskset_prefix,
-        os.environ.get("CXX") or "clang++",
-        str(file),
-        "-o",
-        str(output),
-        *arguments,
-        *includes,
-        standard,
-        *profile_flags,
-    ]
+#     taskset_prefix = ["taskset", "--cpu-list", "23"]
+#     call = [
+#         *taskset_prefix,
+#         os.environ.get("CXX") or "clang++",
+#         str(file),
+#         "-o",
+#         str(output),
+#         *arguments,
+#         *includes,
+#         standard,
+#         *profile_flags,
+#     ]
 
-    output.parent.mkdir(exist_ok=True, parents=True)
-    start_time = time.time()
-    check_call(call, cwd=file.parent)
-    end_time = time.time()
-    output.unlink()
+#     output.parent.mkdir(exist_ok=True, parents=True)
+#     start_time = time.time()
+#     check_call(call, cwd=file.parent)
+#     end_time = time.time()
+#     output.unlink()
 
-    trace_file = output.with_suffix(".json")
-    # print(f"Generated {trace_file}")
-    return trace_file, end_time - start_time
+#     trace_file = output.with_suffix(".json")
+#     # print(f"Generated {trace_file}")
+#     return trace_file, end_time - start_time
 
 
 @click.command()
+@click.option("--tree-query", type=str, default=None)
+@click.option("--system-info", type=bool, is_flag=True, default=False)
 @click.option("--emit-tree", type=bool, is_flag=True, default=False)
 @click.option("--preprocess", type=bool, is_flag=True, default=False)
 @click.option("--list-runs", type=bool, is_flag=True, default=False)
-@click.option("--tree-query", type=str, default=None)
-@click.option("--system-info", type=bool, is_flag=True)
+@click.option("--list-compilers", type=bool, is_flag=True, default=False)
+@click.option("--pin-cpu", type=str, default=None)
+@click.option("--jobs", type=int, default=None)
 @click.argument("file", type=Path, nargs=-1)
 def main(
-    file: Iterable[Path],
+    tree_query: Optional[str],
+    system_info: bool,
     emit_tree: bool,
     preprocess: bool,
     list_runs: bool,
-    tree_query: Optional[str],
-    system_info: bool
-):
+    list_compilers: bool,
+    pin_cpu: Optional[str],
+    jobs: Optional[int],
+    file: Iterable[Path]
+) -> int:
+
     if system_info:
         for key, value in asdict(SYSTEM_INFO).items():
             print(f"{key:<15}: {value}")
-        return
+        return 0
 
+    if list_compilers:
+        # do compiler discovery
+        compilers: list[Compiler] = list(discover())
+
+        for compiler in compilers:
+            print(compiler)
+            for dialect in compiler.dialects:
+                print(f"    {dialect!s}")
+        return 0
+
+    has_flags = any([emit_tree, tree_query, preprocess, list_runs])
+    # todo dispatch flag-like commands properly
+    if has_flags:
+        for source_file in file:
+            if emit_tree or tree_query:
+                print_tree(source_file, tree_query)
+                print()
+                continue
+
+            parsed = TranslationUnit(source_file)
+            if preprocess:
+                print(parsed.source)
+                print()
+                continue
+
+            if list_runs:
+                print(f"File: {source_file}")
+                print(parsed)
+                print()
+                for test in parsed.tests:
+                    print(f"Evaluated: \n    {test.evaluated}")
+                    print(f"Runs: \n    {test.runs}")
+                    print()
+                continue
+
+        return 0
+
+    runner = Runner(jobs, pin_cpu)
     for source_file in file:
-        if emit_tree or tree_query:
-            print_tree(source_file, tree_query)
-            print()
-            continue
+        runner.run(source_file)
 
-        source, tests = parse(source_file)
-        if preprocess:
-            print(source)
-            print()
-            continue
-
-        if list_runs:
-            for test in tests:
-                print()
-                print(f"Evaluated: \n    {test.evaluated}")
-                print(f"Runs: \n    {test.runs}")
-                print()
-            continue
-
-        build_folder = Path.cwd() / "build"
-        build_folder.mkdir(exist_ok=True, parents=True)
-
-        preprocessed = build_folder / source_file.name
-        preprocessed.write_text(source)
-        idx = 0
-        for test in tests:
-            print(f"Name: {test.name}")
-            for run in test.runs:
-                idx += 1
-                trace = generate_trace(
-                    preprocessed,
-                    preprocessed.with_stem(f"{preprocessed.stem}_run_{idx}"),
-                    run,
-                )
-                print(f"{trace[1]*1000} {run}")
+    if len(file) == 0:
+        logging.warning("crashbench needs input files")
+        return 1

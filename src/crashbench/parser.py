@@ -442,31 +442,34 @@ class TranslationUnit(Scope):
         processed_source += self.raw_source[last:].decode()
         return processed_source
 
-    def parse(self):
+    def __str__(self):
         def stringify_functions(dictionary):
             return "\n      ".join(fnc.definition for fnc in dictionary.values())
 
-        print("Variables: ")
-        print("  Global:")
-        print(f"    Variables: {self.variables}")
-        print("    Functions: ")
+        lines = []
+        lines.append("Variables:")
+        lines.append("  Global:")
+        lines.append(f"    Variables: {self.variables}")
+        lines.append("    Functions: ")
         if self.functions:
-            print(f"      {stringify_functions(self.functions)}")
+            lines.append(f"      {stringify_functions(self.functions)}")
         for test in self.tests:
             variables = {
                 name: str(variable) for name, variable in test.variables.items()
             }
-            print(f"  {test.name}:")
-            print(f"    Variables: {variables}")
-            print(f"    Functions:")
+            lines.append(f"  {test.name}:")
+            lines.append(f"    Variables: {variables}")
+            lines.append(f"    Functions:")
             if test.functions:
-                print(f"      {stringify_functions(test.functions)}")
-            print(f"    Used: {test.used}")
+                lines.append(f"      {stringify_functions(test.functions)}")
+            lines.append(f"    Used: {test.used}")
+
+        return '\n'.join(lines)
 
 
 def parse(source_path: Path):
     source = TranslationUnit(source_path)
-    source.parse()
+    # source.parse()
     return source.source, source.tests
 
 
