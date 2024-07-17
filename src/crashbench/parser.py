@@ -17,10 +17,25 @@ QUERY = {
     if file.suffix == ".lisp"
 }
 
+namespace_blacklist = ["std", "gnu", "clang", "gsl", "msvc", "riscv"]
+setting_blacklist = [
+    "carries_dependency",
+    "deprecated",
+    "fallthrough",
+    "likely",
+    "unlikely",
+    "maybe_unused",
+    "nodiscard",
+    "noreturn",
+    "no_unique_address",
+    "assume",
+    "indeterminate"]
+
 
 @runtime_checkable
 class Unevaluated(Protocol):
     def evaluate(self, scope: "Scope"): ...
+
 
 class PendingCall:
     def __init__(self, fnc, *arguments):
@@ -159,15 +174,11 @@ class Scope:
                 name = match["name"].text.decode()
 
                 if "value" in match:
-                    # print(f"{match['name'].text.decode()} = {match['value'].text.decode()}")
                     self.add_variable(name, self.parse_argument(match["value"]))
                     remove |= True
                 elif "function" in match:
                     self.add_function(name, Lambda(name, match["function"], self))
                     remove |= True
-                    # print(f"{match['name'].text.decode()} = {match['function'].text.decode()}")
-                # print(match)
-            # print(node)
         return remove
 
     def parse_attribute(self, node: Node):
@@ -182,6 +193,11 @@ class Scope:
         if prefix := node.child_by_field_name("prefix"):
             # metavar
             varname = prefix.text.decode()
+            if varname in namespace_blacklist:
+                # variables matching one of the builtin attribute namespace names
+                # are disallowed, do not attempt to parse them
+                return False
+
             if name not in BUILTINS and name not in self.functions:
                 print(f"skipped {varname}: {name} is not a known function or builtin")
                 return False
@@ -195,6 +211,10 @@ class Scope:
             self.add_variable(varname, PendingCall(self.get_function(name), *arguments))
         else:
             # setting
+            if name in setting_blacklist:
+                # do not attempt to parse builtin attributes
+                return False
+
             if name == "use":
                 self.parse_use(args)
 
@@ -401,6 +421,7 @@ class Test(Scope):
         expanded = [expand(name, vars) for name, vars in self.evaluated.items()]
         return list(dict(run) for run in product(*expanded))
 
+
 class TranslationUnit(Scope):
     def __init__(self, source_path: Path):
         super().__init__()
@@ -464,7 +485,7 @@ class TranslationUnit(Scope):
                 lines.append(f"      {stringify_functions(test.functions)}")
             lines.append(f"    Used: {test.used}")
 
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
 
 def parse(source_path: Path):

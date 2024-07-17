@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from crashbench.util import remove_duplicates, run, which
+from crashbench.util import run
 
 from .compiler import Compiler, Dialect
 
