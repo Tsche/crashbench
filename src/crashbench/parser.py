@@ -65,10 +65,7 @@ class PendingCall:
 class Variable:
     def __init__(self, name: str):
         self.name = name
-
-    @property
-    def __name__(self):
-        return self.name
+        self.__name__ = name
 
     def __repr__(self):
         return self.name
@@ -80,6 +77,33 @@ class Variable:
 class Setting:
     def __init__(self, name: str, args: Node): ...
 
+def parse_constant(node: Node):
+    match node.type:
+        case "string_literal":
+            assert node.named_child_count == 1
+            return node.named_children[0].text.decode()
+        case "number_literal":
+            # TODO integer literal suffixes
+            # TODO hex, octal, binary literals
+            # TODO separators
+            text = node.text.decode()
+            try:
+                return float(text) if "." in text else int(text)
+            except ValueError:
+                return text
+        case "char_literal":
+            assert node.named_child_count == 1
+            return node.named_children[0].text.decode()
+        case "concatenated_string":
+            return "".join(parse_constant(child) for child in node.named_children)
+        case "true":
+            return True
+        case "false":
+            return False
+        case "null":
+            return None
+        case _:
+            raise ValueError(f"Unexpected node type {node.type}")
 
 class Scope:
     def __init__(self, parent: Optional["Scope"] = None):
@@ -125,11 +149,12 @@ class Scope:
             case "call_expression":
                 name_node = node.child_by_field_name("function")
                 name = name_node.text.decode()
+                function = self.get_function(name)
+                assert function is not None, f"No function {name} found"
+
                 arguments = list(
                     self.parse_argument_list(node.child_by_field_name("arguments"))
                 )
-                function = self.get_function(name)
-                assert function is not None, f"No function {name} found"
                 return PendingCall(function, *arguments)
 
             case "identifier":
@@ -139,6 +164,7 @@ class Scope:
                     return fnc
 
                 return Variable(ident)
+            # TODO kw args via assignment
             case _:
                 raise ValueError(f"Unexpected node type {node.type}")
 
@@ -152,7 +178,8 @@ class Scope:
         remove = False
 
         if node.named_children[-1].type == "expression_statement":
-            # regular attribute
+            # regular attribute 
+            # [[identifier]], [[identifier(foo)]] etc
             if node.named_child_count == 2:
                 # only one attribute => independent
                 remove |= self.parse_attribute(node.named_children[0].named_children[0])
@@ -163,7 +190,8 @@ class Scope:
                     assert child.type == "attribute_declaration"
                     remove |= self.parse_attribute(child.named_children[0])
         elif node.named_children[-1].type == "labeled_statement":
-            # attribute using
+            # attribute using 
+            # [[using ident1: ident2]], [[using ident1: ident2, ident3]], [[using ident1: ident2(foo)]] and so on
             assert (
                 node.has_error
             ), "Node doesn't have an error. Did tree-sitter-cpp get fixed?"
@@ -186,12 +214,15 @@ class Scope:
 
         if node.named_children[-1].type != "argument_list":
             # no args, currently not used
+            # for example: [[foo]]
             return False
+
         args = node.named_children[-1]
         name = node.child_by_field_name("name").text.decode()
 
         if prefix := node.child_by_field_name("prefix"):
-            # metavar
+            # has namespace prefix => metavar
+            # [[metavar::generator(foo)]]
             varname = prefix.text.decode()
             if varname in namespace_blacklist:
                 # variables matching one of the builtin attribute namespace names
@@ -205,30 +236,28 @@ class Scope:
             arguments = list(self.parse_argument_list(args))
             if name == "var" and len(arguments) == 1:
                 # special case var(x) with arity of one
+                # ie [[metavar::var(12)]]
                 self.add_variable(varname, arguments[0])
                 return True
 
             self.add_variable(varname, PendingCall(self.get_function(name), *arguments))
         else:
-            # setting
+            # no namespace prefix => setting or weak builtin
+            # ie [[use(foo)]], [[language("c++")]]
+
             if name in setting_blacklist:
                 # do not attempt to parse builtin attributes
                 return False
 
             if name == "use":
-                self.parse_use(args)
+                # special case [[use(ident)]]
+                for variable in self.parse_argument_list(args):
+                    assert isinstance(variable, Variable), f"Wrong argument type. All args must be variables"
+                    self.set_used(variable.name)
 
             # TODO check if name matches a known setting
             self.settings[name] = Setting(name, args)
         return True
-
-    def parse_use(self, args: Node):
-        arguments = list(self.parse_argument_list(args))
-        for variable in arguments:
-            assert isinstance(
-                variable, Variable
-            ), f"Wrong argument type. All args must be variables"
-            self.set_used(variable.name)
 
     def set_used(self, variable: str):
         assert variable is not None
@@ -471,9 +500,12 @@ class TranslationUnit(Scope):
         lines.append("Variables:")
         lines.append("  Global:")
         lines.append(f"    Variables: {self.variables}")
-        lines.append("    Functions: ")
+        lines.append( "    Functions:")
         if self.functions:
             lines.append(f"      {stringify_functions(self.functions)}")
+        lines.append("    Settings:")
+        for key, value in self.settings.items():
+            lines.append(f"      {key} = {value!s}")
         for test in self.tests:
             variables = {
                 name: str(variable) for name, variable in test.variables.items()

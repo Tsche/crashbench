@@ -6,7 +6,7 @@ from typing import Iterable, Optional
 import click
 
 from .runner import Runner
-from .parser import TranslationUnit, parse, print_tree
+from .parser import TranslationUnit, print_tree
 from .sysinfo import SYSTEM_INFO
 from .compilers import discover, Compiler
 

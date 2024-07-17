@@ -19,4 +19,6 @@
 [[GCC(false)]]; // GCC disabled for this TU
 
 // versions for multiple versions?
-[[Clang(version=">=18", trace=true)]];
+// [[Clang(version=">=18", trace=true)]];
+
+[[x::var(value=3)]];
