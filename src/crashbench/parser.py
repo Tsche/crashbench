@@ -32,7 +32,8 @@ setting_blacklist = [
     "noreturn",
     "no_unique_address",
     "assume",
-    "indeterminate"]
+    "indeterminate",
+]
 
 
 @runtime_checkable
@@ -47,23 +48,29 @@ class PendingCall:
         self.kwargs = kwargs
         self.value = None
 
-    def evaluate_args(self, scope: "Scope"):
-        for argument in self.args:
-            if isinstance(argument, Unevaluated):
-                yield argument.evaluate(scope)
-            else:
-                yield argument
+    def evaluate_arg(self, scope, argument):
+        if isinstance(argument, Unevaluated):
+            return argument.evaluate(scope)
+        else:
+            return argument
 
     def evaluate(self, scope: "Scope"):
         if self.value is None:
             # evaluate only once, recall afterwards
-            self.value = self.fnc(*list(self.evaluate_args(scope)))
+            positional_args = [
+                self.evaluate_arg(scope, argument) for argument in self.args
+            ]
+            keyword_args = {
+                key: self.evaluate_arg(scope, argument)
+                for key, argument in self.kwargs.items()
+            }
+            self.value = self.fnc(*positional_args, **keyword_args)
 
         return self.value
 
     def __repr__(self):
-        args = ', '.join(str(argument) for argument in self.args)
-        kwargs = ', '.join(f"{key}={value}" for key, value in self.kwargs.items())
+        args = ", ".join(str(argument) for argument in self.args)
+        kwargs = ", ".join(f"{key}={value}" for key, value in self.kwargs.items())
         argument_list = f"{args}{', ' if len(kwargs) and len(args) else ''}{kwargs}"
         return f"{self.fnc.__name__}({argument_list})"
 
@@ -79,9 +86,13 @@ class Variable:
     def evaluate(self, scope: "Scope"):
         return scope.evaluate_variable(self.name)
 
+
 def parse_constant(node: Node):
     match node.type:
         case "string_literal":
+            if node.named_child_count == 0:
+                return ""
+
             assert node.named_child_count == 1
             return node.named_children[0].text.decode()
         case "number_literal":
@@ -107,6 +118,7 @@ def parse_constant(node: Node):
         case _:
             raise ValueError(f"Unexpected node type {node.type}")
 
+
 class Scope:
     def __init__(self, parent: Optional["Scope"] = None):
         self.parent = parent
@@ -119,7 +131,7 @@ class Scope:
     def parse_argument_list(self, node: Node):
         args = []
         kwargs = {}
-        
+
         for child in node.named_children:
             if child.type == "comment":
                 continue
@@ -134,7 +146,9 @@ class Scope:
                 kwargs[key] = self.parse_argument(rhs)
             else:
                 if kwargs:
-                    raise ValueError("Positional arguments may not follow keyword arguments")
+                    raise ValueError(
+                        "Positional arguments may not follow keyword arguments"
+                    )
                 args.append(self.parse_argument(child))
 
         return args, kwargs
@@ -150,7 +164,10 @@ class Scope:
                 function = self.get_function(name)
                 assert function is not None, f"No function {name} found"
 
-                return PendingCall(function, *self.parse_argument_list(node.child_by_field_name("arguments")))
+                return PendingCall(
+                    function,
+                    *self.parse_argument_list(node.child_by_field_name("arguments")),
+                )
 
             case "identifier":
                 ident = node.text.decode()
@@ -173,7 +190,7 @@ class Scope:
         remove = False
 
         if node.named_children[-1].type == "expression_statement":
-            # regular attribute 
+            # regular attribute
             # [[identifier]], [[identifier(foo)]] etc
             if node.named_child_count == 2:
                 # only one attribute => independent
@@ -185,7 +202,7 @@ class Scope:
                     assert child.type == "attribute_declaration"
                     remove |= self.parse_attribute(child.named_children[0])
         elif node.named_children[-1].type == "labeled_statement":
-            # attribute using 
+            # attribute using
             # [[using ident1: ident2]], [[using ident1: ident2, ident3]], [[using ident1: ident2(foo)]] and so on
             assert (
                 node.has_error
@@ -237,7 +254,9 @@ class Scope:
                     self.add_variable(varname, args[0])
                     return True
 
-            self.add_variable(varname, PendingCall(self.get_function(name), args, kwargs))
+            self.add_variable(
+                varname, PendingCall(self.get_function(name), args, kwargs)
+            )
         else:
             # no namespace prefix => setting or weak builtin
             # ie [[use(foo)]], [[language("c++")]]
@@ -249,10 +268,14 @@ class Scope:
             args, kwargs = self.parse_argument_list(argument_list)
             if name == "use":
                 # special case [[use(ident)]]
+                assert len(args) > 0, "Use needs at least one argument"
+                assert len(kwargs) == 0, f"Unrecognized keyword arguments {kwargs}"
                 for variable in args:
-                    assert isinstance(variable, Variable), f"Wrong argument type. All args must be variables"
-                    assert len(kwargs) == 0, f"Unrecognized keyword arguments {kwargs}"
+                    assert isinstance(
+                        variable, Variable
+                    ), f"Wrong argument type. All args must be variables"
                     self.set_used(variable.name)
+                return True
 
             self.settings.add(name, args, kwargs)
         return True
@@ -498,12 +521,12 @@ class TranslationUnit(Scope):
         lines.append("Variables:")
         lines.append("  Global:")
         lines.append(f"    Variables: {self.variables}")
-        lines.append( "    Functions:")
+        lines.append("    Functions:")
         if self.functions:
             lines.append(f"      {stringify_functions(self.functions)}")
         lines.append("    Settings:")
-        
-        lines.append('      ' + '\n      '.join(str(self.settings).split('\n')))
+
+        lines.append("      " + "\n      ".join(str(self.settings).split("\n")))
         for test in self.tests:
             variables = {
                 name: str(variable) for name, variable in test.variables.items()

@@ -20,5 +20,3 @@
 
 // versions for multiple versions?
 [[Clang(version=">=18", trace=true)]];
-
-// [[x::var(1)]];
