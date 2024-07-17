@@ -1,3 +1,4 @@
+import contextlib
 from dataclasses import dataclass
 from functools import cached_property
 from pprint import pprint
@@ -8,6 +9,8 @@ import tree_sitter_cpp
 from tree_sitter import Language, Parser, Node
 
 from .builtins import BUILTINS
+from .util import handle
+from .settings import Settings
 
 CPP = Language(tree_sitter_cpp.language())
 
@@ -38,14 +41,14 @@ class Unevaluated(Protocol):
 
 
 class PendingCall:
-    def __init__(self, fnc, *arguments):
+    def __init__(self, fnc, args, kwargs):
         self.fnc = fnc
-        self.arguments = arguments
-
+        self.args = args
+        self.kwargs = kwargs
         self.value = None
 
     def evaluate_args(self, scope: "Scope"):
-        for argument in self.arguments:
+        for argument in self.args:
             if isinstance(argument, Unevaluated):
                 yield argument.evaluate(scope)
             else:
@@ -59,7 +62,10 @@ class PendingCall:
         return self.value
 
     def __repr__(self):
-        return f"{self.fnc.__name__}({', '.join(str(argument) for argument in self.arguments)})"
+        args = ', '.join(str(argument) for argument in self.args)
+        kwargs = ', '.join(f"{key}={value}" for key, value in self.kwargs.items())
+        argument_list = f"{args}{', ' if len(kwargs) and len(args) else ''}{kwargs}"
+        return f"{self.fnc.__name__}({argument_list})"
 
 
 class Variable:
@@ -72,10 +78,6 @@ class Variable:
 
     def evaluate(self, scope: "Scope"):
         return scope.evaluate_variable(self.name)
-
-
-class Setting:
-    def __init__(self, name: str, args: Node): ...
 
 def parse_constant(node: Node):
     match node.type:
@@ -109,53 +111,46 @@ class Scope:
     def __init__(self, parent: Optional["Scope"] = None):
         self.parent = parent
 
-        self.settings: dict[str, Any] = {}
+        self.settings = Settings(parent.settings if parent else None)
         self.variables: dict[str, Any] = {}
         self.functions: dict[str, Lambda] = {}
         self.used: set[str] = set()
 
     def parse_argument_list(self, node: Node):
+        args = []
+        kwargs = {}
+        
         for child in node.named_children:
-            if child.type != "comment":
-                yield self.parse_argument(child)
+            if child.type == "comment":
+                continue
+
+            if child.type == "assignment_expression":
+                lhs = child.child_by_field_name("left")
+                assert lhs.type == "identifier", "Invalid lhs node type"
+                key = lhs.text.decode()
+                assert key not in kwargs, f"Duplicate keyword argument {key}"
+
+                rhs = child.child_by_field_name("right")
+                kwargs[key] = self.parse_argument(rhs)
+            else:
+                if kwargs:
+                    raise ValueError("Positional arguments may not follow keyword arguments")
+                args.append(self.parse_argument(child))
+
+        return args, kwargs
 
     def parse_argument(self, node: Node):
+        with contextlib.suppress(ValueError):
+            return parse_constant(node)
+
         match node.type:
-            case "string_literal":
-                assert node.named_child_count == 1
-                return node.named_children[0].text.decode()
-            case "number_literal":
-                # TODO integer literal suffixes
-                # TODO hex, octal, binary literals
-                # TODO separators
-                text = node.text.decode()
-                try:
-                    return float(text) if "." in text else int(text)
-                except ValueError:
-                    return text
-            case "char_literal":
-                assert node.named_child_count == 1
-                return node.named_children[0].text.decode()
-            case "concatenated_string":
-                return "".join(
-                    self.parse_argument(child) for child in node.named_children
-                )
-            case "true":
-                return True
-            case "false":
-                return False
-            case "null":
-                return None
             case "call_expression":
                 name_node = node.child_by_field_name("function")
                 name = name_node.text.decode()
                 function = self.get_function(name)
                 assert function is not None, f"No function {name} found"
 
-                arguments = list(
-                    self.parse_argument_list(node.child_by_field_name("arguments"))
-                )
-                return PendingCall(function, *arguments)
+                return PendingCall(function, *self.parse_argument_list(node.child_by_field_name("arguments")))
 
             case "identifier":
                 ident = node.text.decode()
@@ -217,7 +212,7 @@ class Scope:
             # for example: [[foo]]
             return False
 
-        args = node.named_children[-1]
+        argument_list = node.named_children[-1]
         name = node.child_by_field_name("name").text.decode()
 
         if prefix := node.child_by_field_name("prefix"):
@@ -233,14 +228,16 @@ class Scope:
                 print(f"skipped {varname}: {name} is not a known function or builtin")
                 return False
 
-            arguments = list(self.parse_argument_list(args))
-            if name == "var" and len(arguments) == 1:
-                # special case var(x) with arity of one
-                # ie [[metavar::var(12)]]
-                self.add_variable(varname, arguments[0])
-                return True
+            args, kwargs = self.parse_argument_list(argument_list)
+            if name == "var":
+                assert len(kwargs) == 0, f"Unrecognized keyword arguments {kwargs}"
+                if len(args) == 1:
+                    # special case var(x) with arity of one
+                    # ie [[metavar::var(12)]]
+                    self.add_variable(varname, args[0])
+                    return True
 
-            self.add_variable(varname, PendingCall(self.get_function(name), *arguments))
+            self.add_variable(varname, PendingCall(self.get_function(name), args, kwargs))
         else:
             # no namespace prefix => setting or weak builtin
             # ie [[use(foo)]], [[language("c++")]]
@@ -249,14 +246,15 @@ class Scope:
                 # do not attempt to parse builtin attributes
                 return False
 
+            args, kwargs = self.parse_argument_list(argument_list)
             if name == "use":
                 # special case [[use(ident)]]
-                for variable in self.parse_argument_list(args):
+                for variable in args:
                     assert isinstance(variable, Variable), f"Wrong argument type. All args must be variables"
+                    assert len(kwargs) == 0, f"Unrecognized keyword arguments {kwargs}"
                     self.set_used(variable.name)
 
-            # TODO check if name matches a known setting
-            self.settings[name] = Setting(name, args)
+            self.settings.add(name, args, kwargs)
         return True
 
     def set_used(self, variable: str):
@@ -504,8 +502,8 @@ class TranslationUnit(Scope):
         if self.functions:
             lines.append(f"      {stringify_functions(self.functions)}")
         lines.append("    Settings:")
-        for key, value in self.settings.items():
-            lines.append(f"      {key} = {value!s}")
+        
+        lines.append('      ' + '\n      '.join(str(self.settings).split('\n')))
         for test in self.tests:
             variables = {
                 name: str(variable) for name, variable in test.variables.items()

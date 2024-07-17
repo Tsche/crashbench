@@ -16,9 +16,9 @@
 
 // compiler specific settings
 // msvc implicitly disabled (msvc doesn't support gnu extensions)
-[[GCC(false)]]; // GCC disabled for this TU
+[[GCC(enabled=false)]]; // GCC disabled for this TU
 
 // versions for multiple versions?
-// [[Clang(version=">=18", trace=true)]];
+[[Clang(version=">=18", trace=true)]];
 
-[[x::var(value=3)]];
+// [[x::var(1)]];
