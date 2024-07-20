@@ -2,6 +2,7 @@ from collections import defaultdict
 import contextlib
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import difflib
 import json
 import logging
 import os
@@ -180,3 +181,9 @@ def handle(**criteria):
                     return handler.fnc(node)
             raise ValueError("No appropriate overload found")
     return Handler
+
+def get_closest_match(name, other_names) -> Optional[str]:
+    unique_canonicalized = {variable.upper(): variable for variable in other_names}
+    if close_matches := difflib.get_close_matches(name.upper(), unique_canonicalized, 1):
+        return unique_canonicalized[close_matches[0]]
+    return None

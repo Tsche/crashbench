@@ -49,9 +49,9 @@ class Settings:
     @builtin
     def compiler_setting(self, compiler: str, *args, enabled: bool = True, **kwargs):
         assert is_valid_compiler(compiler), f"Unrecognized compiler {compiler}"
-        print(enabled)
-        print(args)
-        print(kwargs)
+        # print(enabled)
+        # print(args)
+        # print(kwargs)
 
     @builtin
     def gnu_extensions(self, enabled: bool):

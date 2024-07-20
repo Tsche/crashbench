@@ -1,6 +1,7 @@
 import contextlib
 from dataclasses import dataclass
 from functools import cached_property
+from colorama import Fore, Back, Style
 from pprint import pprint
 from pathlib import Path
 from itertools import product
@@ -9,8 +10,9 @@ import tree_sitter_cpp
 from tree_sitter import Language, Parser, Node
 
 from .builtins import BUILTINS
-from .util import handle
 from .settings import Settings
+from .exceptions import ParseError, UndefinedError
+from .util import get_closest_match
 
 CPP = Language(tree_sitter_cpp.language())
 
@@ -34,6 +36,41 @@ setting_blacklist = [
     "assume",
     "indeterminate",
 ]
+
+
+def decorate(
+    message: str,
+    fg: Optional[Fore] = None,
+    bg: Optional[Back] = None,
+    style: Optional[Style] = None,
+):
+    out = []
+    if fg:
+        out.append(fg)
+    if bg:
+        out.append(bg)
+    if style:
+        out.append(style)
+    out.extend((message, Style.RESET_ALL))
+    return "".join(out)
+
+
+class DiagnosticLevel:
+    @dataclass
+    class Level:
+        label: str
+        color: Fore
+
+        def format(
+            self, filename: Optional[str], row: int, column: int, message: str
+        ) -> str:
+            return f"{filename or '<unknown>'}:{row}:{column}: {self.color}{self.label}:{Fore.RESET} {message}"
+
+        def colored(self, message: str):
+            return decorate(message, fg=self.color)
+
+    WARNING = Level("warning", Fore.YELLOW)
+    ERROR = Level("error", Fore.RED)
 
 
 @runtime_checkable
@@ -116,7 +153,7 @@ def parse_constant(node: Node):
         case "null":
             return None
         case _:
-            raise ValueError(f"Unexpected node type {node.type}")
+            raise ParseError(f"Unexpected node type {node.type}", node)
 
 
 class Scope:
@@ -128,6 +165,30 @@ class Scope:
         self.functions: dict[str, Lambda] = {}
         self.used: set[str] = set()
 
+    @property
+    def all_variables(self):
+        yield from self.variables.keys()
+        if self.parent:
+            yield from self.parent.variables.keys()
+
+    def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node):
+        if self.parent is not None:
+            # forward up to reach TU scope
+            return self.parent.emit_diagnostic(level, message, node)
+
+        # if we ended up here, something went wrong. Emit the diagnostic without context
+        start_row = node.range.start_point.row
+        start_column = node.range.start_point.column
+        # unfortunately we do not have the file name available here
+        diagnostic = level.format(None, start_row, start_column, message)
+        print(diagnostic)
+
+    def emit_warning(self, message: str, node: Node):
+        self.emit_diagnostic(DiagnosticLevel.WARNING, message, node)
+
+    def emit_error(self, message: str, node: Node):
+        self.emit_diagnostic(DiagnosticLevel.ERROR, message, node)
+
     def parse_argument_list(self, node: Node):
         args = []
         kwargs = {}
@@ -138,37 +199,34 @@ class Scope:
 
             if child.type == "assignment_expression":
                 lhs = child.child_by_field_name("left")
-                assert lhs.type == "identifier", "Invalid lhs node type"
+                if lhs.type != "identifier":
+                    raise ParseError("Keyword argument name must be identifier", lhs)
+
                 key = lhs.text.decode()
-                assert key not in kwargs, f"Duplicate keyword argument {key}"
+                if key in kwargs:
+                    raise ParseError(f"Duplicate keyword argument {key}", lhs)
 
                 rhs = child.child_by_field_name("right")
                 kwargs[key] = self.parse_argument(rhs)
+            elif kwargs:
+                raise ParseError(
+                    "Positional arguments may not follow keyword arguments", child
+                )
             else:
-                if kwargs:
-                    raise ValueError(
-                        "Positional arguments may not follow keyword arguments"
-                    )
                 args.append(self.parse_argument(child))
 
+        # TODO return the used Node for every argument as well for better diagnostics
         return args, kwargs
 
     def parse_argument(self, node: Node):
-        with contextlib.suppress(ValueError):
+        with contextlib.suppress(ParseError):
             return parse_constant(node)
 
         match node.type:
             case "call_expression":
                 name_node = node.child_by_field_name("function")
-                name = name_node.text.decode()
-                function = self.get_function(name)
-                assert function is not None, f"No function {name} found"
-
-                return PendingCall(
-                    function,
-                    *self.parse_argument_list(node.child_by_field_name("arguments")),
-                )
-
+                argument_list = node.child_by_field_name("arguments")
+                return self.parse_call(name_node, argument_list)
             case "identifier":
                 ident = node.text.decode()
                 if fnc := self.get_function(ident):
@@ -178,7 +236,28 @@ class Scope:
                 return Variable(ident)
             # TODO kw args via assignment
             case _:
-                raise ValueError(f"Unexpected node type {node.type}")
+                raise ParseError(f"Unexpected node type {node.type}", node)
+
+    def parse_call(self, name_node: Node, argument_list: Node):
+        name = name_node.text.decode()
+        if not (fnc := self.get_function(name)):
+            raise UndefinedError(
+                f"Undefined function `{name}` used", name_node, name, self
+            )
+
+        args, kwargs = self.parse_argument_list(argument_list)
+
+        if name == "var":
+            if len(kwargs) != 0:
+                raise ParseError("var does not take keyword arguments", argument_list)
+            if len(args) == 0:
+                raise ParseError("var needs at least one argument", argument_list)
+            elif len(args) == 1:
+                # special case var(x) with arity of one
+                # ie [[metavar::var(12)]]
+                return args[0]
+
+        return PendingCall(fnc, *args, **kwargs)
 
     def parse_attr_node(self, node: Node):
         assert node.type == "attributed_statement", f"Wrong type: {node.type}"
@@ -230,7 +309,8 @@ class Scope:
             return False
 
         argument_list = node.named_children[-1]
-        name = node.child_by_field_name("name").text.decode()
+        name_node = node.child_by_field_name("name")
+        name = name_node.text.decode()
 
         if prefix := node.child_by_field_name("prefix"):
             # has namespace prefix => metavar
@@ -241,22 +321,8 @@ class Scope:
                 # are disallowed, do not attempt to parse them
                 return False
 
-            if name not in BUILTINS and name not in self.functions:
-                print(f"skipped {varname}: {name} is not a known function or builtin")
-                return False
-
-            args, kwargs = self.parse_argument_list(argument_list)
-            if name == "var":
-                assert len(kwargs) == 0, f"Unrecognized keyword arguments {kwargs}"
-                if len(args) == 1:
-                    # special case var(x) with arity of one
-                    # ie [[metavar::var(12)]]
-                    self.add_variable(varname, args[0])
-                    return True
-
-            self.add_variable(
-                varname, PendingCall(self.get_function(name), args, kwargs)
-            )
+            self.add_variable(varname, self.parse_call(name_node, argument_list))
+            return True
         else:
             # no namespace prefix => setting or weak builtin
             # ie [[use(foo)]], [[language("c++")]]
@@ -268,28 +334,44 @@ class Scope:
             args, kwargs = self.parse_argument_list(argument_list)
             if name == "use":
                 # special case [[use(ident)]]
-                assert len(args) > 0, "Use needs at least one argument"
-                assert len(kwargs) == 0, f"Unrecognized keyword arguments {kwargs}"
+                if len(args) == 0:
+                    raise ParseError("Use needs at least one argument", argument_list)
+                if len(kwargs) != 0:
+                    raise ParseError(
+                        f"Unrecognized keyword arguments {kwargs}", argument_list
+                    )
                 for variable in args:
-                    assert isinstance(
-                        variable, Variable
-                    ), f"Wrong argument type. All args must be variables"
-                    self.set_used(variable.name)
+                    if not isinstance(variable, Variable):
+                        raise ParseError(
+                            "Wrong argument type. All args must be variables",
+                            argument_list,
+                        )
+
+                    if not self.get_variable(variable.name):
+                        raise UndefinedError(
+                            f"Unrecognized variable {variable} marked used",
+                            argument_list,
+                            name,
+                            self,
+                        )
+
+                    self.used.add(variable)
                 return True
 
             self.settings.add(name, args, kwargs)
         return True
 
-    def set_used(self, variable: str):
-        assert variable is not None
-        assert self.get_variable(
-            variable
-        ), f"Unrecognized variable {variable} marked used"
-
-        self.used.add(variable)
-
     def add_variable(self, variable: str, value: Any):
-        assert variable not in self.variables, f"Overwriting variable {variable}"
+        if variable in self.variables:
+            # TODO parse context
+            raise ParseError(f"Redefining {variable} is not allowed", None)
+
+        if self.parent and variable in self.parent.all_variables:
+            self.emit_warning(
+                f"definition of `{decorate(variable, style=Style.BRIGHT)}` shadows global definition",
+                None,
+            )
+
         self.variables[variable] = value
 
     def add_function(self, function: str, value: Any):
@@ -325,10 +407,6 @@ class Scope:
 
         if self.parent is not None:
             return self.parent.evaluate_variable(variable)
-
-    def add_setting(self, setting: str, value: Any):
-        # it's okay to overwrite settings
-        self.settings[setting] = value
 
 
 class Lambda:
@@ -398,7 +476,8 @@ class Test(Scope):
     def __init__(self, node: dict[str, Node], parent: Optional[Scope] = None):
         super().__init__(parent)
         self.kind = node["kind"].text.decode()
-        assert self.kind in ("benchmark", "test")
+        if self.kind not in ("benchmark", "test"):
+            raise ParseError(f"Invalid test kind {self.kind} specified", node["kind"])
 
         self.name = node["test_name"].text.decode()
         self.head = node["test_head"]
@@ -480,6 +559,27 @@ class TranslationUnit(Scope):
         self.raw_source = source_path.read_bytes()
         self.tests: list[Test] = []
 
+        try:
+            self._parse()
+        except ParseError as exc:
+            self.emit_error(exc.message, exc.node)
+            raise SystemExit(1)
+        except UndefinedError as exc:
+            if similar := get_closest_match(exc.name, exc.scope.all_variables):
+                # add suggestions
+                start_column = exc.node.range.start_point.column
+                decorated_name = decorate(similar, fg=Fore.GREEN, style=Style.BRIGHT)
+                self.emit_error(
+                    f"{exc.message}; did you mean `{decorated_name}`?", exc.node
+                )
+                print(f"{' '*5}| {' '*start_column}{decorated_name}")
+            else:
+                # only print the error if there are no close matches
+                self.emit_error(exc.message, exc.node)
+
+            raise SystemExit(1)
+
+    def _parse(self):
         parser = Parser(CPP)
         tree = parser.parse(self.raw_source)
         self.skip_list: list[Range | Test] = []
@@ -489,12 +589,56 @@ class TranslationUnit(Scope):
                 test = Test(node, self)
                 self.tests.append(test)
                 self.skip_list.append(test)
-            else:
+            elif "using" in node or "attr" in node:
                 # metavar or config
-                if "using" in node or "attr" in node:
-                    for attr in node.get("attr_node", []):
-                        if self.parse_attr_node(attr):
-                            self.skip_list.append(Range(attr.start_byte, attr.end_byte))
+                for attr in node.get("attr_node", []):
+                    if self.parse_attr_node(attr):
+                        self.skip_list.append(Range(attr.start_byte, attr.end_byte))
+
+    @cached_property
+    def lines(self):
+        return self.raw_source.decode().splitlines()
+
+    def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node):
+        if node is None:
+            print(level.format(None, -1, -1, message))
+            return
+
+        start_row = node.range.start_point.row
+        end_row = node.range.end_point.row
+        start_column = node.range.start_point.column
+        end_column = node.range.end_point.column
+
+        print(level.format(self.source_path.name, start_row, start_column, message))
+        if end_row - start_row == 0:
+            line = self.lines[start_row]
+            line = (
+                line[:start_column]
+                + level.colored(line[start_column:end_column])
+                + line[end_column:]
+            )
+
+            squiggle_amount = max(end_column - start_column - 1, 0)
+            squiggles = level.colored("^" + "~" * (squiggle_amount))
+
+            print(f"{start_row:<4} | {line}")
+            print(f"{' '*5}| {' '*start_column}{squiggles}")
+            return
+
+        for idx in range(end_row - start_row + 1):
+            line = self.lines[start_row + idx]
+            if idx == 0:
+                error_line = " " * start_column + level.colored(
+                    "^" + "~" * (len(line) - start_column - 2)
+                )
+                line = line[:start_column] + level.colored(line[start_column:])
+
+            elif idx == end_row - start_row:
+                error_line = level.colored("~" * end_column)
+                line = level.colored(line[:end_column]) + line[end_column:]
+
+            print(f"{start_row + idx:<4} | {line}")
+            print(f"{' ' * 5}| {error_line}")
 
     @cached_property
     def source(self):
