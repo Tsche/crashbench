@@ -1,4 +1,6 @@
 import contextlib
+import difflib
+from sys import stderr
 from dataclasses import dataclass
 from functools import cached_property
 from colorama import Fore, Back, Style
@@ -12,7 +14,6 @@ from tree_sitter import Language, Parser, Node
 from .builtins import BUILTINS
 from .settings import Settings
 from .exceptions import ParseError, UndefinedError
-from .util import get_closest_match
 
 CPP = Language(tree_sitter_cpp.language())
 
@@ -64,7 +65,7 @@ class DiagnosticLevel:
         def format(
             self, filename: Optional[str], row: int, column: int, message: str
         ) -> str:
-            return f"{filename or '<unknown>'}:{row}:{column}: {self.color}{self.label}:{Fore.RESET} {message}"
+            return f"{filename or '<unknown>'}:{row}:{column}: {self.color}{self.label}:{Fore.RESET} {message}\n"
 
         def colored(self, message: str):
             return decorate(message, fg=self.color)
@@ -169,7 +170,33 @@ class Scope:
     def all_variables(self):
         yield from self.variables.keys()
         if self.parent:
-            yield from self.parent.variables.keys()
+            yield from self.parent.all_variables
+        else:
+            # we've reached the topmost scope => emit builtins
+            yield from BUILTINS
+
+    def nearest_match(self, name: str, is_function: Optional[bool] = None):
+        unique_canonicalized = {
+            variable.upper(): variable for variable in self.all_variables
+        }
+        if close_matches := difflib.get_close_matches(
+            name.upper(), unique_canonicalized, 1
+        ):
+            print(close_matches)
+            if is_function is None:
+                # we don't know whether we're looking for a function or variable
+                # simply return the closest match
+                return unique_canonicalized[close_matches[0]]
+
+            decanonicalized = [unique_canonicalized[match] for match in close_matches]
+            # return first name that matches the category (function/var)
+            with contextlib.suppress(StopIteration):
+                return next(
+                    variable
+                    for variable in decanonicalized
+                    if is_function and callable(self.get_variable(variable))
+                )
+        return None
 
     def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node):
         if self.parent is not None:
@@ -180,8 +207,7 @@ class Scope:
         start_row = node.range.start_point.row
         start_column = node.range.start_point.column
         # unfortunately we do not have the file name available here
-        diagnostic = level.format(None, start_row, start_column, message)
-        print(diagnostic)
+        stderr.write(level.format(None, start_row, start_column, message))
 
     def emit_warning(self, message: str, node: Node):
         self.emit_diagnostic(DiagnosticLevel.WARNING, message, node)
@@ -242,7 +268,11 @@ class Scope:
         name = name_node.text.decode()
         if not (fnc := self.get_function(name)):
             raise UndefinedError(
-                f"Undefined function `{name}` used", name_node, name, self
+                f"Undefined function `{name}` used",
+                name_node,
+                name,
+                self,
+                is_function=True,
             )
 
         args, kwargs = self.parse_argument_list(argument_list)
@@ -257,7 +287,17 @@ class Scope:
                 # ie [[metavar::var(12)]]
                 return args[0]
 
-        return PendingCall(fnc, *args, **kwargs)
+        return PendingCall(fnc, args, kwargs)
+
+    def find_error_node(self, node: Node):
+        assert node.has_error, "Cannot find error node within a node that isn't erroneous"
+
+        for child in node.named_children:
+            if child.has_error:
+                return self.find_error_node(child)
+
+        # no named children were erroneous -> can't descend further, return current node
+        return node
 
     def parse_attr_node(self, node: Node):
         assert node.type == "attributed_statement", f"Wrong type: {node.type}"
@@ -271,6 +311,10 @@ class Scope:
         if node.named_children[-1].type == "expression_statement":
             # regular attribute
             # [[identifier]], [[identifier(foo)]] etc
+
+            if node.has_error:
+                raise ParseError("Invalid syntax", self.find_error_node(node) or node)
+
             if node.named_child_count == 2:
                 # only one attribute => independent
                 remove |= self.parse_attribute(node.named_children[0].named_children[0])
@@ -290,10 +334,11 @@ class Scope:
             for _, match in QUERY["using_attr"].matches(node):
                 assert "using" in match
                 assert "name" in match
+                name_node = match["name"]
                 name = match["name"].text.decode()
 
                 if "value" in match:
-                    self.add_variable(name, self.parse_argument(match["value"]))
+                    self.add_variable(name_node, self.parse_argument(match["value"]))
                     remove |= True
                 elif "function" in match:
                     self.add_function(name, Lambda(name, match["function"], self))
@@ -321,7 +366,7 @@ class Scope:
                 # are disallowed, do not attempt to parse them
                 return False
 
-            self.add_variable(varname, self.parse_call(name_node, argument_list))
+            self.add_variable(prefix, self.parse_call(name_node, argument_list))
             return True
         else:
             # no namespace prefix => setting or weak builtin
@@ -353,6 +398,7 @@ class Scope:
                             argument_list,
                             name,
                             self,
+                            is_function=False,
                         )
 
                     self.used.add(variable)
@@ -361,18 +407,20 @@ class Scope:
             self.settings.add(name, args, kwargs)
         return True
 
-    def add_variable(self, variable: str, value: Any):
-        if variable in self.variables:
+    def add_variable(self, variable: Node, value: Any):
+        # TODO
+        variable_name = variable.text.decode() if isinstance(variable, Node) else variable
+        if variable_name in self.variables:
             # TODO parse context
-            raise ParseError(f"Redefining {variable} is not allowed", None)
+            raise ParseError(f"Redefining {variable} is not allowed", variable)
 
-        if self.parent and variable in self.parent.all_variables:
+        if self.parent and variable_name in self.parent.all_variables:
             self.emit_warning(
-                f"definition of `{decorate(variable, style=Style.BRIGHT)}` shadows global definition",
-                None,
+                f"definition of `{decorate(variable_name, style=Style.BRIGHT)}` shadows global definition",
+                variable,
             )
 
-        self.variables[variable] = value
+        self.variables[variable_name] = value
 
     def add_function(self, function: str, value: Any):
         self.functions[function] = value
@@ -413,6 +461,7 @@ class Lambda:
     def __init__(self, name: str, node: Node, scope: Scope):
         self.name = name
         *args, function = list(self.parse_nested_comma(node))
+        # TODO: capture actual Nodes
         self.arg_names = args
 
         parse_scope = Scope(scope)
@@ -548,7 +597,7 @@ class Test(Scope):
                 yield (name, value)
 
         expanded = [expand(name, vars) for name, vars in self.evaluated.items()]
-        return list(dict(run) for run in product(*expanded))
+        return [dict(run) for run in product(*expanded)]
 
 
 class TranslationUnit(Scope):
@@ -565,14 +614,14 @@ class TranslationUnit(Scope):
             self.emit_error(exc.message, exc.node)
             raise SystemExit(1)
         except UndefinedError as exc:
-            if similar := get_closest_match(exc.name, exc.scope.all_variables):
+            if similar := exc.scope.nearest_match(exc.name, exc.is_function):
                 # add suggestions
                 start_column = exc.node.range.start_point.column
                 decorated_name = decorate(similar, fg=Fore.GREEN, style=Style.BRIGHT)
                 self.emit_error(
                     f"{exc.message}; did you mean `{decorated_name}`?", exc.node
                 )
-                print(f"{' '*5}| {' '*start_column}{decorated_name}")
+                stderr.write(f"{' '*5}| {' '*start_column}{decorated_name}\n")
             else:
                 # only print the error if there are no close matches
                 self.emit_error(exc.message, exc.node)
@@ -601,7 +650,7 @@ class TranslationUnit(Scope):
 
     def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node):
         if node is None:
-            print(level.format(None, -1, -1, message))
+            stderr.write(level.format(None, -1, -1, message))
             return
 
         start_row = node.range.start_point.row
@@ -609,7 +658,9 @@ class TranslationUnit(Scope):
         start_column = node.range.start_point.column
         end_column = node.range.end_point.column
 
-        print(level.format(self.source_path.name, start_row, start_column, message))
+        stderr.write(
+            level.format(self.source_path.name, start_row, start_column, message)
+        )
         if end_row - start_row == 0:
             line = self.lines[start_row]
             line = (
@@ -621,8 +672,8 @@ class TranslationUnit(Scope):
             squiggle_amount = max(end_column - start_column - 1, 0)
             squiggles = level.colored("^" + "~" * (squiggle_amount))
 
-            print(f"{start_row:<4} | {line}")
-            print(f"{' '*5}| {' '*start_column}{squiggles}")
+            stderr.write(f"{start_row:^5}| {line}\n")
+            stderr.write(f"{' '*5}| {' '*start_column}{squiggles}\n")
             return
 
         for idx in range(end_row - start_row + 1):
@@ -636,9 +687,12 @@ class TranslationUnit(Scope):
             elif idx == end_row - start_row:
                 error_line = level.colored("~" * end_column)
                 line = level.colored(line[:end_column]) + line[end_column:]
+            else:
+                error_line = level.colored("~" * len(line))
+                line = level.colored(line)
 
-            print(f"{start_row + idx:<4} | {line}")
-            print(f"{' ' * 5}| {error_line}")
+            stderr.write(f"{start_row + idx:^5}| {line}\n")
+            stderr.write(f"{' ' * 5}| {error_line}\n")
 
     @cached_property
     def source(self):
