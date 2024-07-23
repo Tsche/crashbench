@@ -84,32 +84,22 @@ class PendingCall:
         self.fnc = fnc
         self.args = args
         self.kwargs = kwargs
-        self.value = None
-
-    def evaluate_arg(self, scope, argument):
-        if isinstance(argument, Unevaluated):
-            return argument.evaluate(scope)
-        else:
-            return argument
 
     def evaluate(self, scope: "Scope"):
-        if self.value is None:
-            # evaluate only once, recall afterwards
-            positional_args = [
-                self.evaluate_arg(scope, argument) for argument in self.args
-            ]
-            keyword_args = {
-                key: self.evaluate_arg(scope, argument)
-                for key, argument in self.kwargs.items()
-            }
-            self.value = self.fnc(*positional_args, **keyword_args)
+        positional_args = [
+            scope.evaluate(argument) for argument in self.args
+        ]
+        keyword_args = {
+            key: scope.evaluate(argument)
+            for key, argument in self.kwargs.items()
+        }
 
-        return self.value
+        return self.fnc(*positional_args, **keyword_args)
 
     def __repr__(self):
         args = ", ".join(str(argument) for argument in self.args)
         kwargs = ", ".join(f"{key}={value}" for key, value in self.kwargs.items())
-        argument_list = f"{args}{', ' if len(kwargs) and len(args) else ''}{kwargs}"
+        argument_list = f"{args}{', ' if kwargs and args else ''}{kwargs}"
         return f"{self.fnc.__name__}({argument_list})"
 
 
@@ -122,7 +112,22 @@ class Variable:
         return self.name
 
     def evaluate(self, scope: "Scope"):
-        return scope.evaluate_variable(self.name)
+        return scope.evaluate(scope.get_variable(self.name))
+
+
+class Conditional:
+    def __init__(self, condition: Node, true_branch: Node, false_branch: Node):
+        self.condition = condition
+        self.true_branch = true_branch
+        self.false_branch = false_branch
+
+    def __repr__(self):
+        return f"if {self.condition} then {self.true_branch} else {self.false_branch}"
+
+    def evaluate(self, scope: "Scope"):
+        if scope.evaluate(self.condition):
+            return scope.evaluate(self.true_branch)
+        return scope.evaluate(self.false_branch)
 
 
 def parse_constant(node: Node):
@@ -163,7 +168,6 @@ class Scope:
 
         self.settings = Settings(parent.settings if parent else None)
         self.variables: dict[str, Any] = {}
-        self.functions: dict[str, Lambda] = {}
         self.used: set[str] = set()
 
     @property
@@ -171,9 +175,6 @@ class Scope:
         yield from self.variables.keys()
         if self.parent:
             yield from self.parent.all_variables
-        else:
-            # we've reached the topmost scope => emit builtins
-            yield from BUILTINS
 
     def nearest_match(self, name: str, is_function: Optional[bool] = None):
         unique_canonicalized = {
@@ -182,7 +183,6 @@ class Scope:
         if close_matches := difflib.get_close_matches(
             name.upper(), unique_canonicalized, 1
         ):
-            print(close_matches)
             if is_function is None:
                 # we don't know whether we're looking for a function or variable
                 # simply return the closest match
@@ -197,6 +197,9 @@ class Scope:
                     if is_function and callable(self.get_variable(variable))
                 )
         return None
+
+    def evaluate(self, obj):
+        return obj.evaluate(self) if isinstance(obj, Unevaluated) else obj
 
     def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node):
         if self.parent is not None:
@@ -255,10 +258,11 @@ class Scope:
                 return self.parse_call(name_node, argument_list)
             case "identifier":
                 ident = node.text.decode()
-                if fnc := self.get_function(ident):
-                    # evaluate functions right away
-                    return fnc
+                # if var := self.get_variable(ident):
+                #     # alias - do not wrap in Variable
+                #     return var
 
+                #return self.get_variable(ident) or 
                 return Variable(ident)
             # TODO kw args via assignment
             case _:
@@ -266,7 +270,7 @@ class Scope:
 
     def parse_call(self, name_node: Node, argument_list: Node):
         name = name_node.text.decode()
-        if not (fnc := self.get_function(name)):
+        if (fnc := self.get_variable(name)) is None:
             raise UndefinedError(
                 f"Undefined function `{name}` used",
                 name_node,
@@ -275,6 +279,8 @@ class Scope:
                 is_function=True,
             )
 
+        if not callable(fnc):
+            raise ParseError(f"`{name}` is not callable.", name_node)
         args, kwargs = self.parse_argument_list(argument_list)
 
         if name == "var":
@@ -287,10 +293,24 @@ class Scope:
                 # ie [[metavar::var(12)]]
                 return args[0]
 
+        elif name == "if":
+            # special case conditionals to allow lazy evaluation
+            if len(kwargs) != 0:
+                raise ParseError("if does not take keyword arguments", argument_list)
+            if len(args) != 3:
+                raise ParseError(
+                    "`if` expects exactly 3 positional arguments", argument_list
+                )
+            return Conditional(
+                condition=args[0], true_branch=args[1], false_branch=args[2]
+            )
+
         return PendingCall(fnc, args, kwargs)
 
     def find_error_node(self, node: Node):
-        assert node.has_error, "Cannot find error node within a node that isn't erroneous"
+        assert (
+            node.has_error
+        ), "Cannot find error node within a node that isn't erroneous"
 
         for child in node.named_children:
             if child.has_error:
@@ -341,7 +361,7 @@ class Scope:
                     self.add_variable(name_node, self.parse_argument(match["value"]))
                     remove |= True
                 elif "function" in match:
-                    self.add_function(name, Lambda(name, match["function"], self))
+                    self.add_variable(name, Lambda(name, match["function"], self))
                     remove |= True
         return remove
 
@@ -385,6 +405,7 @@ class Scope:
                     raise ParseError(
                         f"Unrecognized keyword arguments {kwargs}", argument_list
                     )
+
                 for variable in args:
                     if not isinstance(variable, Variable):
                         raise ParseError(
@@ -392,7 +413,7 @@ class Scope:
                             argument_list,
                         )
 
-                    if not self.get_variable(variable.name):
+                    if self.get_variable(variable.name) is None:
                         raise UndefinedError(
                             f"Unrecognized variable {variable} marked used",
                             argument_list,
@@ -402,14 +423,16 @@ class Scope:
                         )
 
                     self.used.add(variable)
+
                 return True
 
             self.settings.add(name, args, kwargs)
         return True
 
     def add_variable(self, variable: Node, value: Any):
-        # TODO
-        variable_name = variable.text.decode() if isinstance(variable, Node) else variable
+        variable_name = (
+            variable.text.decode() if isinstance(variable, Node) else variable
+        )
         if variable_name in self.variables:
             # TODO parse context
             raise ParseError(f"Redefining {variable} is not allowed", variable)
@@ -422,54 +445,30 @@ class Scope:
 
         self.variables[variable_name] = value
 
-    def add_function(self, function: str, value: Any):
-        self.functions[function] = value
-
-    def get_function(self, function: str):
-        if function in BUILTINS:
-            return BUILTINS[function]
-
-        if function in self.functions:
-            return self.functions[function]
-
-        if self.parent:
-            return self.parent.get_function(function)
-
     def get_variable(self, variable: str):
-        if value := self.variables.get(variable, None):
-            return value
+        if variable in self.variables:
+            return self.variables[variable]
 
         if self.parent is not None:
             return self.parent.get_variable(variable)
-
-    def evaluate_variable(self, variable: str | Unevaluated):
-        if isinstance(variable, Unevaluated):
-            return (
-                variable.evaluate(self)
-                if isinstance(variable, Unevaluated)
-                else variable
-            )
-
-        if (value := self.variables.get(variable, None)) is not None:
-            return value.evaluate(self) if isinstance(value, Unevaluated) else value
-
-        if self.parent is not None:
-            return self.parent.evaluate_variable(variable)
 
 
 class Lambda:
     def __init__(self, name: str, node: Node, scope: Scope):
         self.name = name
+        self.__name__ = name
+
         *args, function = list(self.parse_nested_comma(node))
         # TODO: capture actual Nodes
         self.arg_names = args
 
-        parse_scope = Scope(scope)
-        parse_scope.add_function(name, self)
+        self.scope = Scope(scope)
+        self.scope.variables[self.name] = self
 
-        self.function = scope.parse_argument(function)
-        self.scope = scope
-        assert isinstance(self.function, Unevaluated)
+        name_node = function.child_by_field_name("function")
+        argument_list = function.child_by_field_name("arguments")
+
+        self.function = self.scope.parse_call(name_node, argument_list)
 
     def parse_nested_comma(self, node: Node):
         assert node.type == "comma_expression"
@@ -484,24 +483,20 @@ class Lambda:
             yield right
 
     @property
-    def __name__(self):
-        return str(self.function)
-
-    @property
     def definition(self):
         return f"{self.name} {', '.join(self.arg_names)} = {self.function!s}"
 
     def __repr__(self):
         return self.name
 
-    def __call__(self, *args):
+    def __call__(self, *args, **kwargs):
         assert (
             len(args) == len(self.arg_names)
         ), f"Invalid amount of arguments given, expected {len(self.arg_names)}, got {len(args)}"
+
         function_scope = Scope(self.scope)
-        # function_scope.add_function(self.name, self)
         for name, value in zip(self.arg_names, args):
-            function_scope.add_variable(name, value)
+            function_scope.add_variable(name, self.scope.evaluate(value))
 
         return self.function.evaluate(function_scope)
 
@@ -579,15 +574,16 @@ class Test(Scope):
     @cached_property
     def evaluated(self) -> dict[str, list[Any]]:
         variables = {}
-        for name in self.used:
-            variable = self.evaluate_variable(name)
+        for var in self.used:
+            # TODO
+            variable = self.evaluate(var)
             if isinstance(variable, Iterable) and not isinstance(variable, str):
                 # force evaluation of generators
-                variables[name] = list(variable)
+                variables[var.name] = list(variable)
                 continue
 
             # convert scalars to lists
-            variables[name] = [variable]
+            variables[var.name] = [variable]
         return variables
 
     @property
@@ -608,6 +604,9 @@ class TranslationUnit(Scope):
         self.raw_source = source_path.read_bytes()
         self.tests: list[Test] = []
 
+        # builtins shall be treated as globals
+        self.variables |= BUILTINS
+
         try:
             self._parse()
         except ParseError as exc:
@@ -623,7 +622,7 @@ class TranslationUnit(Scope):
                 )
                 stderr.write(f"{' '*5}| {' '*start_column}{decorated_name}\n")
             else:
-                # only print the error if there are no close matches
+                # print only the error if there are no close matches
                 self.emit_error(exc.message, exc.node)
 
             raise SystemExit(1)
@@ -712,16 +711,20 @@ class TranslationUnit(Scope):
         return processed_source
 
     def __str__(self):
-        def stringify_functions(dictionary):
-            return "\n      ".join(fnc.definition for fnc in dictionary.values())
-
         lines = []
         lines.append("Variables:")
         lines.append("  Global:")
-        lines.append(f"    Variables: {self.variables}")
-        lines.append("    Functions:")
-        if self.functions:
-            lines.append(f"      {stringify_functions(self.functions)}")
+        lines.append(f"    Variables: ")
+        for variable, value in self.variables.items():
+            if variable in BUILTINS:
+                continue
+            if isinstance(value, Lambda):
+                lines.append(f"       {value.definition}")
+            else:
+                lines.append(f"       {variable} = {value}")
+        # lines.append("    Functions:")
+        # if self.functions:
+        #     lines.append(f"      {stringify_functions(self.functions)}")
         lines.append("    Settings:")
 
         lines.append("      " + "\n      ".join(str(self.settings).split("\n")))
@@ -731,9 +734,9 @@ class TranslationUnit(Scope):
             }
             lines.append(f"  {test.name}:")
             lines.append(f"    Variables: {variables}")
-            lines.append(f"    Functions:")
-            if test.functions:
-                lines.append(f"      {stringify_functions(test.functions)}")
+            # lines.append(f"    Functions:")
+            # if test.functions:
+            #     lines.append(f"      {stringify_functions(test.functions)}")
             lines.append(f"    Used: {test.used}")
 
         return "\n".join(lines)

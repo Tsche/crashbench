@@ -44,6 +44,7 @@ def conditional(condition, true_branch, false_branch):
     return true_branch if condition else false_branch
 
 BUILTINS = {
+    # 'print': print,
 # builtins
     'any': any,
     'all': all,
