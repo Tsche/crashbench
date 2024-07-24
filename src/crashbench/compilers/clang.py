@@ -3,20 +3,15 @@ from pathlib import Path
 import re
 
 from crashbench.util import run
-from .compiler import Compiler, Dialect
+from .compiler import Dialect
 from .gcc import GCC
 
 
-class Clang(Compiler):
+class Clang(GCC):
     has_gnu_extensions     = True
     standard_pattern       = re.compile(r"use '(?P<standard>[^']+)'")
     standard_alias_pattern = re.compile(r"(( or|,) '(?P<alias>[^']+))")
     executable_pattern     = r"clang(-[0-9]+)?(\.exe|\.EXE)?$"
-    version_pattern        = GCC.version_pattern
-    get_compiler_info      = GCC.get_compiler_info
-    select_language        = GCC.select_language
-    select_dialect         = GCC.select_dialect
-    define                 = GCC.define
 
     @staticmethod
     @cache

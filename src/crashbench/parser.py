@@ -7,13 +7,13 @@ from colorama import Fore, Back, Style
 from pprint import pprint
 from pathlib import Path
 from itertools import product
-from typing import Any, Iterable, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Optional, Protocol, Self, runtime_checkable
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Node
 
 from .builtins import BUILTINS, BINARY_OPERATORS, UNARY_OPERATORS
-from .settings import Settings
 from .exceptions import ParseError, UndefinedError
+from .compilers import compilers, is_valid_compiler
 
 CPP = Language(tree_sitter_cpp.language())
 
@@ -86,13 +86,8 @@ class PendingCall:
         self.kwargs = kwargs
 
     def evaluate(self, scope: "Scope"):
-        positional_args = [
-            scope.evaluate(argument) for argument in self.args
-        ]
-        keyword_args = {
-            key: scope.evaluate(argument)
-            for key, argument in self.kwargs.items()
-        }
+        positional_args = [scope.evaluate(argument) for argument in self.args]
+        keyword_args = {key: scope.evaluate(argument) for key, argument in self.kwargs.items()}
 
         return self.fnc(*positional_args, **keyword_args)
 
@@ -130,6 +125,16 @@ class Conditional:
         return scope.evaluate(self.false_branch)
 
 
+class Settings:
+    def __init__(self, parent: Optional['Settings'] = None):
+        self.parent = parent
+
+    def parse(self, name_node: Node, argument_list: Node):
+        print(name_node.text.decode())
+        print(argument_list.text.decode())
+        return True
+
+
 def parse_constant(node: Node):
     match node.type:
         case "string_literal":
@@ -137,11 +142,14 @@ def parse_constant(node: Node):
                 return ""
 
             assert node.named_child_count == 1
+            assert node.named_children[0].text is not None, "Invalid text node"
+
             return node.named_children[0].text.decode()
         case "number_literal":
             # TODO integer literal suffixes
             # TODO hex, octal, binary literals
             # TODO separators
+            assert node.text is not None, "Invalid text node"
             text = node.text.decode()
             try:
                 return float(text) if "." in text else int(text)
@@ -149,6 +157,8 @@ def parse_constant(node: Node):
                 return text
         case "char_literal":
             assert node.named_child_count == 1
+            assert node.named_children[0].text is not None, "Invalid text node"
+
             return node.named_children[0].text.decode()
         case "concatenated_string":
             return "".join(parse_constant(child) for child in node.named_children)
@@ -161,13 +171,14 @@ def parse_constant(node: Node):
         case _:
             raise ParseError(f"Unexpected node type {node.type}", node)
 
+
 class Scope:
     def __init__(self, parent: Optional["Scope"] = None):
         self.parent = parent
 
-        self.settings = Settings(parent.settings if parent else None)
+        self.settings: Settings = Settings(parent.settings if parent else None)
         self.variables: dict[str, Any] = {}
-        self.used: set[str] = set()
+        self.used: set[Variable] = set()
 
     @property
     def all_variables(self):
@@ -176,12 +187,8 @@ class Scope:
             yield from self.parent.all_variables
 
     def nearest_match(self, name: str, is_function: Optional[bool] = None):
-        unique_canonicalized = {
-            variable.upper(): variable for variable in self.all_variables
-        }
-        if close_matches := difflib.get_close_matches(
-            name.upper(), unique_canonicalized, 1
-        ):
+        unique_canonicalized = {variable.upper(): variable for variable in self.all_variables}
+        if close_matches := difflib.get_close_matches(name.upper(), unique_canonicalized, 1):
             if is_function is None:
                 # we don't know whether we're looking for a function or variable
                 # simply return the closest match
@@ -227,19 +234,21 @@ class Scope:
 
             if child.type == "assignment_expression":
                 lhs = child.child_by_field_name("left")
+                assert lhs is not None, "Could not get lhs of binary expression"
+
                 if lhs.type != "identifier":
                     raise ParseError("Keyword argument name must be identifier", lhs)
 
+                assert lhs.text is not None, "Invalid text node"
                 key = lhs.text.decode()
                 if key in kwargs:
                     raise ParseError(f"Duplicate keyword argument {key}", lhs)
 
                 rhs = child.child_by_field_name("right")
+                assert rhs is not None, "Could not get rhs of binary expression"
                 kwargs[key] = self.parse_argument(rhs)
             elif kwargs:
-                raise ParseError(
-                    "Positional arguments may not follow keyword arguments", child
-                )
+                raise ParseError("Positional arguments may not follow keyword arguments", child)
             else:
                 args.append(self.parse_argument(child))
 
@@ -253,21 +262,23 @@ class Scope:
         match node.type:
             case "call_expression":
                 name_node = node.child_by_field_name("function")
+                assert name_node is not None, "Could not parse function name"
+
                 argument_list = node.child_by_field_name("arguments")
+                assert argument_list is not None, "Could not parse argument list"
+
                 return self.parse_call(name_node, argument_list)
             case "identifier":
+                assert node.text is not None, "Invalid text node"
                 ident = node.text.decode()
-                # if var := self.get_variable(ident):
-                #     # alias - do not wrap in Variable
-                #     return var
-
-                #return self.get_variable(ident) or 
                 return Variable(ident)
-            
+
             case "unary_expression":
                 assert node.child_count == 2
 
                 op_node, argument = node.children
+                assert op_node.text is not None, "Invalid text node"
+
                 operation = op_node.text.decode()
                 if operation not in UNARY_OPERATORS:
                     raise ParseError(f"Invalid unary operation `{operation}`", op_node)
@@ -278,17 +289,35 @@ class Scope:
                 assert node.child_count == 3
 
                 lhs, op_node, rhs = node.children
+                assert op_node.text is not None, "Invalid text node"
+
                 operation = op_node.text.decode()
+                assert op_node.text is not None, "Invalid text node"
+
                 if operation not in BINARY_OPERATORS:
                     raise ParseError(f"Invalid binary operation `{operation}`", op_node)
 
-                return PendingCall(BINARY_OPERATORS[operation], [self.parse_argument(lhs), self.parse_argument(rhs)], {})
+                return PendingCall(
+                    BINARY_OPERATORS[operation],
+                    [self.parse_argument(lhs), self.parse_argument(rhs)],
+                    {},
+                )
 
             case "conditional_expression":
                 condition = node.child_by_field_name("condition")
+                assert condition is not None, "Could not parse condition"
+
                 true_branch = node.child_by_field_name("consequence")
+                assert true_branch is not None, "Could not parse consequence"
+
                 false_branch = node.child_by_field_name("alternative")
-                return Conditional(self.parse_argument(condition), self.parse_argument(true_branch), self.parse_argument(false_branch))
+                assert false_branch is not None, "Could not parse alternative"
+
+                return Conditional(
+                    self.parse_argument(condition),
+                    self.parse_argument(true_branch),
+                    self.parse_argument(false_branch),
+                )
 
             case "parenthesized_expression":
                 assert node.named_child_count == 1
@@ -298,15 +327,10 @@ class Scope:
                 raise ParseError(f"Unexpected node type {node.type}", node)
 
     def parse_call(self, name_node: Node, argument_list: Node):
+        assert name_node.text is not None, "Invalid text node"
         name = name_node.text.decode()
         if (fnc := self.get_variable(name)) is None:
-            raise UndefinedError(
-                f"Undefined function `{name}` used",
-                name_node,
-                name,
-                self,
-                is_function=True,
-            )
+            raise UndefinedError(f"Undefined function `{name}` used", name_node, name, self, is_function=True)
 
         if not callable(fnc):
             raise ParseError(f"`{name}` is not callable.", name_node)
@@ -314,7 +338,9 @@ class Scope:
 
         if name in ("var", "return"):
             if len(kwargs) != 0:
-                raise ParseError(f"{name} does not take keyword arguments", argument_list)
+                raise ParseError(
+                    f"{name} does not take keyword arguments", argument_list
+                )
             if len(args) == 0:
                 raise ParseError(f"{name} needs at least one argument", argument_list)
             elif len(args) == 1:
@@ -329,18 +355,14 @@ class Scope:
             if len(kwargs) != 0:
                 raise ParseError("if does not take keyword arguments", argument_list)
             if len(args) != 3:
-                raise ParseError(
-                    "`if` expects exactly 3 positional arguments", argument_list
-                )
+                raise ParseError("`if` expects exactly 3 positional arguments", argument_list)
             return Conditional(
                 condition=args[0], true_branch=args[1], false_branch=args[2]
             )
         return PendingCall(fnc, args, kwargs)
 
     def find_error_node(self, node: Node):
-        assert (
-            node.has_error
-        ), "Cannot find error node within a node that isn't erroneous"
+        assert node.has_error, "Cannot find error node within a node that isn't erroneous"
 
         for child in node.named_children:
             if child.has_error:
@@ -351,10 +373,8 @@ class Scope:
 
     def parse_attr_node(self, node: Node):
         assert node.type == "attributed_statement", f"Wrong type: {node.type}"
-        assert node.named_children[-1].type in (
-            "expression_statement",
-            "labeled_statement",
-        ), f"Wrong type: {node.named_children[-1].type}"
+        assert node.named_children[-1].type in ("expression_statement", "labeled_statement"), \
+            f"Wrong type: {node.named_children[-1].type}"
 
         remove = False
 
@@ -377,21 +397,29 @@ class Scope:
         elif node.named_children[-1].type == "labeled_statement":
             # attribute using
             # [[using ident1: ident2]], [[using ident1: ident2, ident3]], [[using ident1: ident2(foo)]] and so on
-            assert (
-                node.has_error
-            ), "Node doesn't have an error. Did tree-sitter-cpp get fixed?"
+            assert node.has_error, "Node doesn't have an error. Did tree-sitter-cpp get fixed?"
 
             for _, match in QUERY["using_attr"].matches(node):
                 assert "using" in match
-                assert "name" in match
-                name_node = match["name"]
-                name = match["name"].text.decode()
+                name_node = match.get("name")
+
+                assert name_node is not None, "Could not get name node"
+                assert not isinstance(name_node, list), "More than one name node found"
+                assert name_node.text is not None, "Invalid text node"
+                name = name_node.text.decode()
 
                 if "value" in match:
-                    self.add_variable(name_node, self.parse_argument(match["value"]))
+                    value = match.get("value")
+                    assert value is not None, "Could not get value node"
+                    assert not isinstance(value, list), "More than one value node found"
+
+                    self.add_variable(name_node, self.parse_argument(value))
                     remove |= True
                 elif "function" in match:
-                    self.add_variable(name, Lambda(name, match["function"], self))
+                    fnc = match.get("function")
+                    assert fnc is not None, "Could not get function node"
+                    assert not isinstance(fnc, list), "More than one function node found"
+                    self.add_variable(name_node, Lambda(name, fnc, self))
                     remove |= True
         return remove
 
@@ -399,72 +427,87 @@ class Scope:
         assert node.type == "attribute", f"Wrong type: {node.type}"
         argument_list = node.named_children[-1] if node.named_children[-1].type == "argument_list" else None
         name_node = node.child_by_field_name("name")
-        name = name_node.text.decode()
+        assert name_node is not None, "Could not get name node"
 
         if prefix := node.child_by_field_name("prefix"):
-            # has namespace prefix => metavar
-            # [[metavar::generator(foo)]]
-            varname = prefix.text.decode()
-            if varname in namespace_blacklist:
-                # variables matching one of the builtin attribute namespace names
-                # are disallowed, do not attempt to parse them
-                return False
-            
+            return self.parse_metavar(prefix, name_node, argument_list)
+
+        return self.parse_setting(name_node, argument_list)
+
+    def parse_setting(self, name_node: Node, argument_list: Optional[Node]):
+        # no namespace prefix => setting or weak builtin
+        # ie [[use(foo)]], [[language("c++")]]
+        assert name_node.text, "Invalid text node"
+        name = name_node.text.decode()
+
+        if name in setting_blacklist:
+            # do not attempt to parse builtin attributes
+            return False
+
+        if argument_list is None:
+            # currently unused => abort if there is no argument list
+            # ie [[foo]]
+            return False
+
+        if name == "use":
+            # special case [[use(ident)]]
+            self.parse_use_args(argument_list)
+            return True
+
+        return self.settings.parse(name_node, argument_list)
+
+    def parse_use_args(self, argument_list: Node):
+        args, kwargs = self.parse_argument_list(argument_list)
+        if len(args) == 0:
+            raise ParseError("Use needs at least one argument", argument_list)
+        if len(kwargs) != 0:
+            raise ParseError(f"Unrecognized keyword arguments {kwargs}", argument_list)
+
+        for variable in args:
+            if not isinstance(variable, Variable):
+                raise ParseError("Wrong argument type. All args must be variables", argument_list)
+
+            if self.get_variable(variable.name) is None:
+                raise UndefinedError(f"Unrecognized variable {variable} marked used",
+                                     argument_list, str(variable), self, is_function=False)
+
+            self.used.add(variable)
+
+    def parse_metavar(self, prefix: Node, name_node: Node, argument_list: Optional[Node]):
+        # has namespace prefix => metavar
+        # [[metavar::generator(foo)]]
+
+        assert prefix.text is not None, "Invalid text node"
+        varname = prefix.text.decode()
+        if varname in namespace_blacklist:
+            # variables matching one of the builtin attribute namespace names
+            # are disallowed, do not attempt to parse them
+            return False
+
+        if is_valid_compiler(varname):
+            # special case - prefix is a compiler
+            # => this isn't a metavar, it's a compiler-specific setting or function
             if argument_list is None:
-                # alias
-                self.add_variable(prefix, self.parse_argument(name_node))
-            else:
-                # variable
-                self.add_variable(prefix, self.parse_call(name_node, argument_list))
+                raise ParseError("Compiler settings and metafunctions must have arguments", name_node)
+            args, kwargs = self.parse_argument_list(argument_list)
+
+            assert name_node.text, "Invalid text node"
+            name = name_node.text.decode()
+
+            # TODO
+            print(f"{varname} {name} {args} {kwargs}")
 
             return True
-        else:
-            # no namespace prefix => setting or weak builtin
-            # ie [[use(foo)]], [[language("c++")]]
 
-            if name in setting_blacklist:
-                # do not attempt to parse builtin attributes
-                return False
+        self.add_variable(prefix, self.parse_argument(name_node)
+                          if argument_list is None else self.parse_call(name_node, argument_list))
 
-            args, kwargs = self.parse_argument_list(argument_list)
-            if name == "use":
-                # special case [[use(ident)]]
-                if len(args) == 0:
-                    raise ParseError("Use needs at least one argument", argument_list)
-                if len(kwargs) != 0:
-                    raise ParseError(
-                        f"Unrecognized keyword arguments {kwargs}", argument_list
-                    )
-
-                for variable in args:
-                    if not isinstance(variable, Variable):
-                        raise ParseError(
-                            "Wrong argument type. All args must be variables",
-                            argument_list,
-                        )
-
-                    if self.get_variable(variable.name) is None:
-                        raise UndefinedError(
-                            f"Unrecognized variable {variable} marked used",
-                            argument_list,
-                            name,
-                            self,
-                            is_function=False,
-                        )
-
-                    self.used.add(variable)
-
-                return True
-
-            self.settings.add(name, args, kwargs)
         return True
 
     def add_variable(self, variable: Node, value: Any):
-        variable_name = (
-            variable.text.decode() if isinstance(variable, Node) else variable
-        )
+        assert variable.text is not None, "Invalid text node"
+        variable_name: str = variable.text.decode()
         if variable_name in self.variables:
-            # TODO parse context
             raise ParseError(f"Redefining {variable} is not allowed", variable)
 
         if self.parent and variable_name in self.parent.all_variables:
@@ -488,25 +531,28 @@ class Lambda:
         self.name = name
         self.__name__ = name
 
-        *args, function = list(self.parse_nested_comma(node))
-        # TODO: capture actual Nodes
+        *args, fnc = list(self.parse_nested_comma(node))
         self.arg_names = args
 
         self.scope = Scope(scope)
         self.scope.variables[self.name] = self
 
-        name_node = function.child_by_field_name("function")
-        argument_list = function.child_by_field_name("arguments")
+        name_node = fnc.child_by_field_name("function")
+        argument_list = fnc.child_by_field_name("arguments")
 
         self.function = self.scope.parse_call(name_node, argument_list)
 
     def parse_nested_comma(self, node: Node):
         assert node.type == "comma_expression"
         left = node.child_by_field_name("left")
+
+        assert left is not None, "Could not get lhs"
         assert left.type == "identifier", "Expected an identifier"
-        yield left.text.decode()
+        yield left
 
         right = node.child_by_field_name("right")
+        assert right is not None, "Could not get rhs"
+
         if right.type == "comma_expression":
             yield from self.parse_nested_comma(right)
         else:
@@ -514,15 +560,14 @@ class Lambda:
 
     @property
     def definition(self):
-        return f"{self.name} {', '.join(self.arg_names)} = {self.function!s}"
+        return f"{self.name} {', '.join(arg.text.decode() for arg in self.arg_names)} = {self.function!s}"
 
     def __repr__(self):
         return self.name
 
     def __call__(self, *args, **kwargs):
-        assert (
-            len(args) == len(self.arg_names)
-        ), f"Invalid amount of arguments given, expected {len(self.arg_names)}, got {len(args)}"
+        assert len(args) == len(self.arg_names), \
+            f"Invalid amount of arguments given, expected {len(self.arg_names)}, got {len(args)}"
 
         function_scope = Scope(self.scope)
         for name, value in zip(self.arg_names, args):
@@ -536,33 +581,48 @@ class Range:
     start_byte: int
     end_byte: int
 
-    def __contains__(self, element):
+    def __contains__(self, element: int):
         assert self.end_byte > self.start_byte, "Invalid range"
         return self.start_byte <= element <= self.end_byte
 
 
 class SkipList(list[Range]):
-    def __contains__(self, element):
-        return any(element in value for value in self)
+    def __contains__(self, element: object):
+        if isinstance(element, int):
+            return any(element in value for value in self)
+        return super().__contains__(element)
 
 
 class Test(Scope):
     def __init__(self, node: dict[str, Node], parent: Optional[Scope] = None):
         super().__init__(parent)
-        self.kind = node["kind"].text.decode()
-        if self.kind not in ("benchmark", "test"):
-            raise ParseError(f"Invalid test kind {self.kind} specified", node["kind"])
+        kind_node = node.get("kind")
+        assert kind_node is not None, "Could not parse test kind"
+        assert kind_node.text is not None, "Invalid text node"
 
-        self.name = node["test_name"].text.decode()
-        self.head = node["test_head"]
-        self.start_byte = node["test_head"].start_byte
-        self.end_byte = node["code"].end_byte
+        self.kind = kind_node.text.decode()
+        if self.kind not in ("benchmark", "test"):
+            raise ParseError(f"Invalid test kind {self.kind} specified", kind_node)
+
+        test_name = node.get("test_name")
+        assert test_name is not None, "Could not parse test name"
+        assert test_name.text is not None, "Invalid text node"
+        self.name: str = test_name.text.decode()
+        self.head: Node = node["test_head"]
+
+        self.start_byte: int = node["test_head"].start_byte
+        self.end_byte: int = node["code"].end_byte
         self.node = node
 
+        attributes: list[Node] | Node = node.get("attr_node", [])
+        if isinstance(attributes, Node):
+            attributes = [attributes]
+
         # note that parse_attr_node has side effects!
+        # TODO
         self.skip_list = SkipList(
             Range(attr.start_byte, attr.end_byte)
-            for attr in node.get("attr_node", [])
+            for attr in attributes
             if self.parse_attr_node(attr)
         )
         self.find_metavar_uses(node["code"])
@@ -570,10 +630,14 @@ class Test(Scope):
     def find_metavar_uses(self, node: Node):
         for _, match in QUERY["identifier"].matches(node):
             ident_node = match["ident"]
+            assert not isinstance(ident_node, list), "Got more than one ident node"
             start_byte = ident_node.start_byte
+            assert start_byte is not None, "Invalid node start byte"
+
             if start_byte in self.skip_list:
                 continue
 
+            assert ident_node.text is not None, "Invalid text node"
             ident = ident_node.text.decode()
             if self.get_variable(ident) is not None:
                 # TODO check if not callable
@@ -581,12 +645,15 @@ class Test(Scope):
                 self.used.add(self.parse_argument(ident_node))
 
     @property
-    def code(self) -> list[int]:
-        code_node: Node = self.node["code"]
+    def code(self) -> str:
+        code_node: Node | None = self.node.get("code")
+        assert code_node is not None, "Invalid code node"
+        assert code_node.text is not None, "Invalid text node"
+
         text = b""
         last = 0
         for skip in self.skip_list:
-            text += code_node.text[last : skip.start_byte - code_node.start_byte]
+            text += code_node.text[last: skip.start_byte - code_node.start_byte]
             last = skip.end_byte - code_node.start_byte
 
             if code_node.text[last] == ord("\n"):
@@ -620,7 +687,7 @@ class Test(Scope):
         return variables
 
     @property
-    def runs(self) -> list[list[Any]]:
+    def runs(self) -> list[dict[Any, Any]]:
         def expand(name, var):
             for value in var:
                 yield (name, value)
@@ -650,9 +717,7 @@ class TranslationUnit(Scope):
                 # add suggestions
                 start_column = exc.node.range.start_point.column
                 decorated_name = decorate(similar, fg=Fore.GREEN, style=Style.BRIGHT)
-                self.emit_error(
-                    f"{exc.message}; did you mean `{decorated_name}`?", exc.node
-                )
+                self.emit_error(f"{exc.message}; did you mean `{decorated_name}`?", exc.node)
                 stderr.write(f"{' '*5}| {' '*start_column}{decorated_name}\n")
             else:
                 # print only the error if there are no close matches
@@ -672,7 +737,11 @@ class TranslationUnit(Scope):
                 self.skip_list.append(test)
             elif "using" in node or "attr" in node:
                 # metavar or config
-                for attr in node.get("attr_node", []):
+                attributes = node.get("attr_node", [])
+                if isinstance(attributes, Node):
+                    attributes = [attributes]
+
+                for attr in attributes:
                     if self.parse_attr_node(attr):
                         self.skip_list.append(Range(attr.start_byte, attr.end_byte))
 
@@ -680,7 +749,7 @@ class TranslationUnit(Scope):
     def lines(self):
         return self.raw_source.decode().splitlines()
 
-    def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node):
+    def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node | None):
         if node is None:
             stderr.write(level.format(None, -1, -1, message))
             return
@@ -690,16 +759,10 @@ class TranslationUnit(Scope):
         start_column = node.range.start_point.column
         end_column = node.range.end_point.column
 
-        stderr.write(
-            level.format(self.source_path.name, start_row, start_column, message)
-        )
+        stderr.write(level.format(self.source_path.name, start_row, start_column, message))
         if end_row - start_row == 0:
             line = self.lines[start_row]
-            line = (
-                line[:start_column]
-                + level.colored(line[start_column:end_column])
-                + line[end_column:]
-            )
+            line = line[:start_column] + level.colored(line[start_column:end_column]) + line[end_column:]
 
             squiggle_amount = max(end_column - start_column - 1, 0)
             squiggles = level.colored("^" + "~" * (squiggle_amount))
@@ -711,9 +774,7 @@ class TranslationUnit(Scope):
         for idx in range(end_row - start_row + 1):
             line = self.lines[start_row + idx]
             if idx == 0:
-                error_line = " " * start_column + level.colored(
-                    "^" + "~" * (len(line) - start_column - 2)
-                )
+                error_line = " " * start_column + level.colored("^" + "~" * (len(line) - start_column - 2))
                 line = line[:start_column] + level.colored(line[start_column:])
 
             elif idx == end_row - start_row:
@@ -731,7 +792,7 @@ class TranslationUnit(Scope):
         processed_source = ""
         last = 0
         for skip in self.skip_list:
-            processed_source += self.raw_source[last : skip.start_byte].decode()
+            processed_source += self.raw_source[last: skip.start_byte].decode()
             if isinstance(skip, Test):
                 processed_source += f"#ifdef {skip.name.upper()}\n"
 
@@ -758,9 +819,9 @@ class TranslationUnit(Scope):
         # lines.append("    Functions:")
         # if self.functions:
         #     lines.append(f"      {stringify_functions(self.functions)}")
-        lines.append("    Settings:")
+        # lines.append("    Settings:")
 
-        lines.append("      " + "\n      ".join(str(self.settings).split("\n")))
+        # lines.append("      " + "\n      ".join(str(self.settings).split("\n")))
         for test in self.tests:
             variables = {
                 name: str(variable) for name, variable in test.variables.items()

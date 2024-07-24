@@ -19,7 +19,9 @@ def get_processor_name():
     elif platform.system() == "Linux":
         command = "cat /proc/cpuinfo"
         all_info = subprocess.check_output(command, shell=True).decode().strip()
-        return re.search(r"model name\s*:\s(?P<label>.*)", all_info).groups()[0]
+        matches = re.search(r"model name\s*:\s(?P<label>.*)", all_info)
+        assert matches is not None, "No CPU model name matches"
+        return matches.groups()[0]
     return ""
 
 @dataclass

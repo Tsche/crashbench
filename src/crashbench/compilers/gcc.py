@@ -7,10 +7,10 @@ from typing import Optional
 
 from crashbench.util import run
 
-from .compiler import Compiler, Dialect
+from .compiler import CompilerFamily, Dialect
 
 
-class GCC(Compiler):
+class GCC(CompilerFamily):
     has_gnu_extensions = True
     executable_pattern = r"^gcc(-[0-9]+)?(\.exe|\.EXE)?$"
     version_pattern = re.compile(
@@ -21,10 +21,6 @@ class GCC(Compiler):
         r"-std=(?P<standard>[^\s]+)[\s]*(Conform.*(C\+\+( draft)? standard))"
         r"((.|(\n    )\s+)*Same.as(.|(\n    )\s+)*-std=(?P<alias>[^\. ]+))?"
     )
-
-    def __init__(self, path: Path, cpp_driver: Optional[Path] = None):
-        super().__init__(path)
-        self.cpp_driver = cpp_driver
 
     @classmethod
     def get_compiler_info(cls, compiler: Path) -> dict[str, str]:

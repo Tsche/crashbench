@@ -15,7 +15,7 @@ class Settings:
     def __init__(self, parent: Optional['Settings'] = None):
         # TODO default to parent settings
 
-        self.compiler_settings = {}
+        self.compiler_settings = {compiler.__name__: compiler() for compiler in compilers}
         self.is_gnu = False
         self.architecture = "host"
         self.lang = "c++"

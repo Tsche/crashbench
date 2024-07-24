@@ -1,6 +1,7 @@
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import os
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Optional
 
@@ -10,17 +11,16 @@ Settings = dict[str, Any]
 Variables = dict[str, Any]
 
 
-class Compiler(ABC):
-    def __init__(self, path: Path):
-        self.executable = path
-        self.info = self.get_compiler_info(path)
-        self.dialects = self.get_supported_dialects(path)
+class Compiler:
+    def __init__(self, path: Path, info: dict[str, str], dialects: dict[str, str]):
+        self.path = path
+        self.info = info
+        self.dialects = dialects
 
+
+class CompilerFamily(ABC):
     def __str__(self):
-        name = f"{self.__class__.__name__} {self.info['version']}"
-        if "target" in self.info:
-            name += " " + self.info["target"]
-        return name
+        return self.__class__.__name__
 
     @classmethod
     @abstractmethod
@@ -32,20 +32,23 @@ class Compiler(ABC):
     def get_supported_dialects(cls, compiler: Path) -> dict[str, str]:
         raise NotImplementedError
 
-    @classmethod
-    def discover(cls):
+    @cached_property
+    def detected(self):
         assert hasattr(
-            cls, "executable_pattern"
+            self, "executable_pattern"
         ), "Class lacks executable search pattern"
-        extra = []
+
+        extra: list[str] = []
         if env_cxx := os.environ.get("CXX"):
-            extra.append(Path(env_cxx))
+            extra.append(env_cxx)
 
         if env_cc := os.environ.get("CC"):
-            extra.append(Path(env_cc))
+            extra.append(env_cc)
 
-        for compiler in remove_duplicates(which(getattr(cls, "executable_pattern"), extra)):
-            yield cls(compiler)
+        return [
+            Compiler(path, self.get_compiler_info(path), self.get_supported_dialects(path))
+            for path in remove_duplicates(which(getattr(self, "executable_pattern"), extra))
+        ]
 
     @staticmethod
     @abstractmethod
@@ -62,14 +65,16 @@ class Compiler(ABC):
     def define(language: str) -> str:
         raise NotImplementedError
 
+    def get_compilers(self, settings):
+        ...
+
     def compile_commands(self, source: Path, settings: Settings, variables: Variables):
+        # TODO find actual compilers
         return [
-            str(self.executable),
+            # str(self.executable),
             str(source),
             *[f"-D{option}={value}" for option, value in variables.items()],
         ]
-
-    
 
 
 @dataclass

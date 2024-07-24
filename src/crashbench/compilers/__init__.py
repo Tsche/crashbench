@@ -1,15 +1,21 @@
-from .compiler import Compiler
+from .compiler import CompilerFamily
 from .clang import Clang
 from .gcc import GCC
-from .msvc import MSVC
+#from .msvc import MSVC
 
-compilers = [Clang, GCC, MSVC]
-__all__ = ["Compiler", "Clang", "GCC", "MSVC"]
+compilers = [Clang, GCC
+             #, MSVC
+            ]
+__all__ = ["CompilerFamily", "Clang", "GCC", 
+           #"MSVC"
+           ]
 
 def discover():
     for compiler in compilers:
-        yield from compiler.discover()
+        yield from compiler().detected
 
+def is_valid_compiler(name: str):
+    return name in [compiler.__name__ for compiler in compilers]
 
 """
 SARIF:

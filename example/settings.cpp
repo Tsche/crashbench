@@ -20,3 +20,12 @@
 
 // versions for multiple versions?
 [[Clang(version=">=18", trace=true)]];
+
+int main(){
+    [[benchmark("bench")]] {
+        [[Clang::trace(true)]];
+
+        [[FOO::range(5)]];
+        static_assert(FOO <= 5);
+    }
+}

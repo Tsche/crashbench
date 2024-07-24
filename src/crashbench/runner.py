@@ -3,13 +3,13 @@ from tempfile import TemporaryDirectory
 import logging
 import platform
 from typing import Optional
-from .compilers import Compiler, discover
+from .compilers import CompilerFamily, discover
 from .parser import TranslationUnit
 
-compilers: list[Compiler] = list(discover())
+compilers: list[CompilerFamily] = list(discover())
 
 class Runner:
-    def __init__(self, jobs: Optional[int] = None, pin_cpu: Optional[int] = None):
+    def __init__(self, jobs: Optional[int] = None, pin_cpu: Optional[str] = None):
         self.pin_cpu = pin_cpu
         self.jobs = jobs
         self.build_dir = TemporaryDirectory("crashbench")
@@ -26,5 +26,6 @@ class Runner:
         for test in source.tests:
             for variables in test.runs:
                 for compiler in compilers:
-                    compile_commands = compiler.compile_commands(processed_path, test.settings, variables)
-                    print(compile_commands)
+                    print(compiler)
+                    #compile_commands = compiler.compile_commands(processed_path, test.settings, variables)
+                    #print(compile_commands)

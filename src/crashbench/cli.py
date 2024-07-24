@@ -1,49 +1,13 @@
 from dataclasses import asdict
-import logging
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import click
 
 from .runner import Runner
 from .parser import TranslationUnit, print_tree
 from .sysinfo import SYSTEM_INFO
-from .compilers import discover, Compiler
-
-# def generate_trace(file, output, arguments: list[str]):
-#     includes = [
-#         # '-isystem', str(Path.cwd() / 'include')
-#     ]
-
-#     standard = "-std=c++2c"
-#     profile_flags = [
-#         # '-ftime-trace',
-#         "-c"
-#     ]
-
-#     taskset_prefix = ["taskset", "--cpu-list", "23"]
-#     call = [
-#         *taskset_prefix,
-#         os.environ.get("CXX") or "clang++",
-#         str(file),
-#         "-o",
-#         str(output),
-#         *arguments,
-#         *includes,
-#         standard,
-#         *profile_flags,
-#     ]
-
-#     output.parent.mkdir(exist_ok=True, parents=True)
-#     start_time = time.time()
-#     check_call(call, cwd=file.parent)
-#     end_time = time.time()
-#     output.unlink()
-
-#     trace_file = output.with_suffix(".json")
-#     # print(f"Generated {trace_file}")
-#     return trace_file, end_time - start_time
-
+from .compilers import discover, CompilerFamily
 
 @click.command()
 @click.option("--tree-query", type=str, default=None)
@@ -73,7 +37,7 @@ def main(
 
     if list_compilers:
         # do compiler discovery
-        compilers: list[Compiler] = list(discover())
+        compilers: list[CompilerFamily] = list(discover())
 
         for compiler in compilers:
             print(compiler)
@@ -107,3 +71,4 @@ def main(
 
     runner = Runner(jobs, pin_cpu)
     runner.run(file)
+    return 0
