@@ -54,7 +54,7 @@ from .compilers import discover, Compiler
 @click.option("--list-compilers", type=bool, is_flag=True, default=False)
 @click.option("--pin-cpu", type=str, default=None)
 @click.option("--jobs", type=int, default=None)
-@click.argument("file", type=Path, nargs=-1)
+@click.argument("file", type=Path)
 def main(
     tree_query: Optional[str],
     system_info: bool,
@@ -64,9 +64,8 @@ def main(
     list_compilers: bool,
     pin_cpu: Optional[str],
     jobs: Optional[int],
-    file: Iterable[Path]
+    file: Path,
 ) -> int:
-
     if system_info:
         for key, value in asdict(SYSTEM_INFO).items():
             print(f"{key:<15}: {value}")
@@ -85,34 +84,26 @@ def main(
     has_flags = any([emit_tree, tree_query, preprocess, list_runs])
     # todo dispatch flag-like commands properly
     if has_flags:
-        for source_file in file:
-            if emit_tree or tree_query:
-                print_tree(source_file, tree_query)
-                print()
-                continue
+        if emit_tree or tree_query:
+            print_tree(file, tree_query)
+            print()
+            return 0
 
-            parsed = TranslationUnit(source_file)
-            if preprocess:
-                print(parsed.source)
-                print()
-                continue
+        parsed = TranslationUnit(file)
+        if preprocess:
+            print(parsed.source)
+            print()
+            return 0
 
-            if list_runs:
-                print(f"File: {source_file}")
-                print(parsed)
+        if list_runs:
+            print(f"File: {file}")
+            print(parsed)
+            print()
+            for test in parsed.tests:
+                print(f"Evaluated: \n    {test.evaluated}")
+                print(f"Runs: \n    {test.runs}")
                 print()
-                for test in parsed.tests:
-                    print(f"Evaluated: \n    {test.evaluated}")
-                    print(f"Runs: \n    {test.runs}")
-                    print()
-                continue
-
-        return 0
+            return 0
 
     runner = Runner(jobs, pin_cpu)
-    for source_file in file:
-        runner.run(source_file)
-
-    if len(file) == 0:
-        logging.warning("crashbench needs input files")
-        return 1
+    runner.run(file)

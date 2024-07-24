@@ -43,8 +43,8 @@ def make_list(*args):
 def conditional(condition, true_branch, false_branch):
     return true_branch if condition else false_branch
 
+
 BUILTINS = {
-    # 'print': print,
 # builtins
     'any': any,
     'all': all,
@@ -84,7 +84,7 @@ BUILTINS = {
     'pos': operator.pos,
     'rshift': operator.rshift,
     'sub': operator.sub,
-    'truediv': operator.truediv,
+    'div': operator.truediv,
     'xor': operator.xor,
     'concat': operator.concat,
     'contains': operator.contains,
@@ -126,5 +126,38 @@ BUILTINS = {
     'join': str.join,
     'prefix_each': prefix_each,
     'suffix_each': suffix_each,
-    'if': conditional
+    'if': conditional,
+    'return': lambda obj: obj,
+
+    'not_eq': operator.ne,
+    'compl': operator.invert
+}
+
+BINARY_OPERATORS = {
+    '<': operator.lt,
+    '<=': operator.le,
+    '==': operator.eq,
+    '!=': operator.ne,
+    'not_eq': operator.ne,
+    '>=': operator.ge,
+    '>': operator.gt,
+    '>>': operator.rshift,
+    '<<': operator.lshift,
+    '||': operator.or_,
+    'or': operator.or_,
+    '&&': operator.and_,
+    'and': operator.and_,
+    '+': operator.add,
+    '-': operator.sub,
+    '*': operator.mul,
+    '/': operator.truediv,
+    '^': operator.xor,
+    'xor': operator.xor
+}
+
+UNARY_OPERATORS = {
+    '!': operator.not_,
+    'not': operator.not_,
+    '~': operator.invert,
+    'compl': operator.invert
 }

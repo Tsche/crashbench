@@ -1,4 +1,3 @@
-/*
 #include <concepts>
 #include <cstddef>
 #include <type_traits>
@@ -281,10 +280,10 @@ template <template <std::size_t, typename...> class getter, std::size_t... Idx>
 void run(std::index_sequence<Idx...>) {
   static_assert((std::same_as<getter<Idx, Dummy<Idx>...>, Dummy<Idx>> && ...));
 }
-*/
+
 int main() {
   [[benchmark("type_at")]] {
-    [[STRATEGY::var("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
+    [[STRATEGY::list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
     [[COUNT::range(0, 2)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});

@@ -11,7 +11,7 @@ from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 import tree_sitter_cpp
 from tree_sitter import Language, Parser, Node
 
-from .builtins import BUILTINS
+from .builtins import BUILTINS, BINARY_OPERATORS, UNARY_OPERATORS
 from .settings import Settings
 from .exceptions import ParseError, UndefinedError
 
@@ -161,7 +161,6 @@ def parse_constant(node: Node):
         case _:
             raise ParseError(f"Unexpected node type {node.type}", node)
 
-
 class Scope:
     def __init__(self, parent: Optional["Scope"] = None):
         self.parent = parent
@@ -264,7 +263,37 @@ class Scope:
 
                 #return self.get_variable(ident) or 
                 return Variable(ident)
-            # TODO kw args via assignment
+            
+            case "unary_expression":
+                assert node.child_count == 2
+
+                op_node, argument = node.children
+                operation = op_node.text.decode()
+                if operation not in UNARY_OPERATORS:
+                    raise ParseError(f"Invalid unary operation `{operation}`", op_node)
+
+                return PendingCall(UNARY_OPERATORS[operation], [self.parse_argument(argument)], {})
+
+            case "binary_expression":
+                assert node.child_count == 3
+
+                lhs, op_node, rhs = node.children
+                operation = op_node.text.decode()
+                if operation not in BINARY_OPERATORS:
+                    raise ParseError(f"Invalid binary operation `{operation}`", op_node)
+
+                return PendingCall(BINARY_OPERATORS[operation], [self.parse_argument(lhs), self.parse_argument(rhs)], {})
+
+            case "conditional_expression":
+                condition = node.child_by_field_name("condition")
+                true_branch = node.child_by_field_name("consequence")
+                false_branch = node.child_by_field_name("alternative")
+                return Conditional(self.parse_argument(condition), self.parse_argument(true_branch), self.parse_argument(false_branch))
+
+            case "parenthesized_expression":
+                assert node.named_child_count == 1
+                return self.parse_argument(node.named_children[0])
+
             case _:
                 raise ParseError(f"Unexpected node type {node.type}", node)
 
@@ -283,16 +312,18 @@ class Scope:
             raise ParseError(f"`{name}` is not callable.", name_node)
         args, kwargs = self.parse_argument_list(argument_list)
 
-        if name == "var":
+        if name in ("var", "return"):
             if len(kwargs) != 0:
-                raise ParseError("var does not take keyword arguments", argument_list)
+                raise ParseError(f"{name} does not take keyword arguments", argument_list)
             if len(args) == 0:
-                raise ParseError("var needs at least one argument", argument_list)
+                raise ParseError(f"{name} needs at least one argument", argument_list)
             elif len(args) == 1:
-                # special case var(x) with arity of one
+                # special case var(x) and return(x) with arity of one
                 # ie [[metavar::var(12)]]
                 return args[0]
 
+            if name == "return":
+                raise ParseError("return must have exactly one argument", argument_list)
         elif name == "if":
             # special case conditionals to allow lazy evaluation
             if len(kwargs) != 0:
@@ -304,7 +335,6 @@ class Scope:
             return Conditional(
                 condition=args[0], true_branch=args[1], false_branch=args[2]
             )
-
         return PendingCall(fnc, args, kwargs)
 
     def find_error_node(self, node: Node):
@@ -367,13 +397,7 @@ class Scope:
 
     def parse_attribute(self, node: Node):
         assert node.type == "attribute", f"Wrong type: {node.type}"
-
-        if node.named_children[-1].type != "argument_list":
-            # no args, currently not used
-            # for example: [[foo]]
-            return False
-
-        argument_list = node.named_children[-1]
+        argument_list = node.named_children[-1] if node.named_children[-1].type == "argument_list" else None
         name_node = node.child_by_field_name("name")
         name = name_node.text.decode()
 
@@ -385,8 +409,14 @@ class Scope:
                 # variables matching one of the builtin attribute namespace names
                 # are disallowed, do not attempt to parse them
                 return False
+            
+            if argument_list is None:
+                # alias
+                self.add_variable(prefix, self.parse_argument(name_node))
+            else:
+                # variable
+                self.add_variable(prefix, self.parse_call(name_node, argument_list))
 
-            self.add_variable(prefix, self.parse_call(name_node, argument_list))
             return True
         else:
             # no namespace prefix => setting or weak builtin
@@ -539,13 +569,16 @@ class Test(Scope):
 
     def find_metavar_uses(self, node: Node):
         for _, match in QUERY["identifier"].matches(node):
-            start_byte = match["ident"].start_byte
+            ident_node = match["ident"]
+            start_byte = ident_node.start_byte
             if start_byte in self.skip_list:
                 continue
 
-            ident = match["ident"].text.decode()
+            ident = ident_node.text.decode()
             if self.get_variable(ident) is not None:
-                self.used.add(ident)
+                # TODO check if not callable
+                # TODO check if not builtin
+                self.used.add(self.parse_argument(ident_node))
 
     @property
     def code(self) -> list[int]:
