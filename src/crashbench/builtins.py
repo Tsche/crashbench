@@ -10,7 +10,7 @@ def zip_repeat(data):
 
 
 def foldl(func, acc, xs):
-  return functools.reduce(func, xs, acc)
+    return functools.reduce(func, xs, acc)
 
 def flip(func):
     @functools.wraps(func)

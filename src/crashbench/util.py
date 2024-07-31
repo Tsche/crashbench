@@ -180,3 +180,74 @@ def handle(**criteria):
                     return handler.fnc(node)
             raise ValueError("No appropriate overload found")
     return Handler
+
+def none_mixin(mixin: type):
+    class Wrapper(mixin):
+        __class__ = type(None)
+        def __str__(self): return str(None)
+        def __repr__(self): return repr(None)
+        def __and__(self, value): return None
+        def __or__(self, value): return value
+        def __xor__(self, value): return None ^ value
+        def __rand__(self, value): return value and None
+        def __ror__(self, value): return value or None
+        def __rxor__(self, value): return value ^ None
+        def __eq__(self, value): return value is None
+    return Wrapper
+
+def bool_mixin(mixin: type):
+    class Wrapper(mixin):
+        __class__ = bool
+        def __new__(cls, value: bool, *args, **kwargs):
+            obj = super().__new__(cls)
+            obj.__value = value
+            return obj
+        def __str__(self): return str(self.__value)
+        def __repr__(self): return repr(self.__value)
+        def __and__(self, value): return self.__value and value
+        def __or__(self, value): return self.__value or value
+        def __xor__(self, value): return self.__value ^ value
+        def __rand__(self, value): return value and self.__value
+        def __ror__(self, value): return value or self.__value
+        def __rxor__(self, value): return value ^ self.__value
+        def __eq__(self, value): return self.__value == value
+        def __bool__(self): return self.__value
+    return Wrapper
+
+def generic_mixin(type_: type, mixin: type):
+    class Wrapper(type_, mixin): 
+        def __new__(cls, obj: type_, *args, **kwargs):
+            return super().__new__(cls, obj)
+        def __init__(self, obj, *args, **kwargs):
+            mixin.__init__(self, obj, *args, **kwargs)
+    return Wrapper
+
+class MetaMixin(type):
+    registry: dict[Any, type] = {}
+    mixin: type
+
+    def __new__(metacls, name, bases, namespace, mixin: type):
+        cls = super().__new__(metacls, name, bases, namespace)
+        cls.mixin = mixin
+        return cls
+
+    def make_class(self, type_: type):
+        if type_ is type(None):
+            return none_mixin(self.mixin)
+        elif type_ is bool:
+            return bool_mixin(self.mixin)
+        else:
+            return generic_mixin(type_, self.mixin)
+
+    def __call__(self, value, *args, **kwargs):
+        key = type(value).__mro__
+        if key not in self.registry:
+            self.registry[key] = self.make_class(type(value))
+        return self.registry[key](value, *args, **kwargs)
+
+
+
+def proxy(mixin: type):
+    class Proxy(metaclass=MetaMixin, mixin=mixin): 
+        ...
+    return Proxy

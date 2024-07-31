@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 
 from crashbench.util import run
-from .compiler import Dialect
+from .compiler import Compiler, Dialect, builtin
 from .gcc import GCC
 
 
@@ -14,7 +14,6 @@ class Clang(GCC):
     executable_pattern     = r"clang(-[0-9]+)?(\.exe|\.EXE)?$"
 
     @staticmethod
-    @cache
     def get_supported_dialects(compiler: Path):
         result = run([str(compiler), "-xc++", "-std=dummy", "-"])
         for line in result.stderr.splitlines():
@@ -30,3 +29,13 @@ class Clang(GCC):
                 match["alias"] for match in Clang.standard_alias_pattern.finditer(line)
             ]
             yield Dialect(standard, aliases)
+
+    @builtin
+    def trace(self, compilers: list[Compiler], enabled: bool):
+        if not enabled:
+            return compilers
+
+        for compiler in compilers:
+            compiler.add_option("-ftime-trace")
+
+        return compilers

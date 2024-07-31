@@ -3,10 +3,10 @@ from tempfile import TemporaryDirectory
 import logging
 import platform
 from typing import Optional
-from .compilers import CompilerFamily, discover
+# from .compilers import CompilerFamily, discover
 from .parser import TranslationUnit
 
-compilers: list[CompilerFamily] = list(discover())
+# compilers: list[CompilerFamily] = list(discover())
 
 class Runner:
     def __init__(self, jobs: Optional[int] = None, pin_cpu: Optional[str] = None):
@@ -19,13 +19,25 @@ class Runner:
             self.pin_cpu = None
 
     def run(self, source_path: Path):
-        source = TranslationUnit(source_path)
+        source = TranslationUnit.from_file(source_path)
         processed_path = Path(self.build_dir.name) / source_path.name
         processed_path.write_text(source.source)
-
+        print(source.tests)
         for test in source.tests:
+            print(f"Test {test.name}")
             for variables in test.runs:
-                for compiler in compilers:
-                    print(compiler)
-                    #compile_commands = compiler.compile_commands(processed_path, test.settings, variables)
-                    #print(compile_commands)
+                for configuration in test.settings.effective_configurations():
+                    print(configuration.compile_command(processed_path, test.name, variables=variables))
+                    print(configuration.assertions)
+                # for compiler, (path, *options) in test.settings.effective_configurations():
+                #     command = compiler.compile_command(path, processed_path, 
+                #                                        compiler.select_language()
+                #                                        *options, compiler.define(test.name.upper()), variables=variables)
+                #     print(command)
+
+        # for test in source.tests:
+        #     for variables in test.runs:
+        #         for compiler in compilers:
+        #             print(compiler)
+        #             #compile_commands = compiler.compile_commands(processed_path, test.settings, variables)
+        #             #print(compile_commands)

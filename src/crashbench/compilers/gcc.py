@@ -3,11 +3,11 @@ from functools import cache
 import re
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from crashbench.util import run
 
-from .compiler import CompilerFamily, Dialect
+from .compiler import Compiler, CompilerFamily, Dialect, builtin
 
 
 class GCC(CompilerFamily):
@@ -36,7 +36,6 @@ class GCC(CompilerFamily):
         return info
 
     @staticmethod
-    @cache
     def get_supported_dialects(compiler: Path):
         standards = defaultdict(list)
         # invoke gcc -v --help
@@ -79,9 +78,15 @@ class GCC(CompilerFamily):
         raise ValueError(f"Language {language} is not supported.")
 
     @staticmethod
-    def select_dialect(dialect: str) -> str:
-        return f'-std={dialect}'
+    def select_dialect(dialect: Dialect) -> str:
+        return f'-std={dialect.name}'
 
     @staticmethod
-    def define(name: str, value: Optional[str] = None) -> str:
+    def define(name: str, value: Optional[Any] = None) -> str:
+        if isinstance(value, bool):
+            value = int(value)
         return f"-D{name}" if value is None else f"-D{name}={value}"
+
+    @builtin
+    def gnu_extensions(self, compilers: list[Compiler], enabled: bool):
+        return compilers

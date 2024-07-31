@@ -7,7 +7,7 @@ import click
 from .runner import Runner
 from .parser import TranslationUnit, print_tree
 from .sysinfo import SYSTEM_INFO
-from .compilers import discover, CompilerFamily
+from .compilers import CompilerFamily
 
 @click.command()
 @click.option("--tree-query", type=str, default=None)
@@ -36,13 +36,13 @@ def main(
         return 0
 
     if list_compilers:
-        # do compiler discovery
-        compilers: list[CompilerFamily] = list(discover())
+        # TODO do compiler discovery
+        # compilers: list[CompilerFamily] = list(discover())
 
-        for compiler in compilers:
-            print(compiler)
-            for dialect in compiler.dialects:
-                print(f"    {dialect!s}")
+        # for compiler in compilers:
+        #     print(compiler)
+        #     for dialect in getattr(compiler, "dialects", []):
+        #         print(f"    {dialect!s}")
         return 0
 
     has_flags = any([emit_tree, tree_query, preprocess, list_runs])
@@ -53,7 +53,7 @@ def main(
             print()
             return 0
 
-        parsed = TranslationUnit(file)
+        parsed = TranslationUnit.from_file(file)
         if preprocess:
             print(parsed.source)
             print()
