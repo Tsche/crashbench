@@ -1,4 +1,4 @@
-from .compiler import CompilerFamily, builtin, COMPILER_BUILTINS
+from .compiler import Compiler, builtin, COMPILER_BUILTINS
 from .clang import Clang
 from .gcc import GCC
 #from .msvc import MSVC
@@ -6,7 +6,7 @@ from .gcc import GCC
 COMPILERS = [Clang, GCC
              #, MSVC
             ]
-__all__ = ["CompilerFamily", "Clang", "GCC", "builtin", "COMPILER_BUILTINS"
+__all__ = ["Compiler", "Clang", "GCC", "builtin", "COMPILER_BUILTINS"
            #"MSVC"
            ]
 

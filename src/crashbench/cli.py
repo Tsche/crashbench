@@ -4,10 +4,10 @@ from typing import Optional
 
 import click
 
-from .runner import Runner
+from .runner import Pool, Runner
 from .parser import TranslationUnit, print_tree
 from .sysinfo import SYSTEM_INFO
-from .compilers import CompilerFamily
+from .compilers import COMPILERS, Compiler
 
 @click.command()
 @click.option("--tree-query", type=str, default=None)
@@ -16,19 +16,25 @@ from .compilers import CompilerFamily
 @click.option("--preprocess", type=bool, is_flag=True, default=False)
 @click.option("--list-runs", type=bool, is_flag=True, default=False)
 @click.option("--list-compilers", type=bool, is_flag=True, default=False)
+@click.option("--dry", type=bool, is_flag=True, default=False)
+@click.option("--keep", type=bool, is_flag=True, default=False)
 @click.option("--pin-cpu", type=str, default=None)
 @click.option("--jobs", type=int, default=None)
-@click.argument("file", type=Path)
+@click.argument("file", type=Path, required=False)
+@click.pass_context
 def main(
+    ctx,
     tree_query: Optional[str],
     system_info: bool,
     emit_tree: bool,
     preprocess: bool,
     list_runs: bool,
     list_compilers: bool,
+    dry: bool,
+    keep: bool,
     pin_cpu: Optional[str],
     jobs: Optional[int],
-    file: Path,
+    file: Optional[Path],
 ) -> int:
     if system_info:
         for key, value in asdict(SYSTEM_INFO).items():
@@ -37,13 +43,17 @@ def main(
 
     if list_compilers:
         # TODO do compiler discovery
-        # compilers: list[CompilerFamily] = list(discover())
+        compilers: list[Compiler] = list([compiler.discover() for compiler in COMPILERS])
 
-        # for compiler in compilers:
-        #     print(compiler)
-        #     for dialect in getattr(compiler, "dialects", []):
-        #         print(f"    {dialect!s}")
+        for compiler in compilers:
+            print(compiler)
+            for dialect in getattr(compiler, "dialects", []):
+                print(f"    {dialect!s}")
         return 0
+
+    # all commands after this require a file, so check it now
+    if file is None:
+        raise click.MissingParameter(ctx=ctx, param_hint="FILE", param_type="argument")
 
     has_flags = any([emit_tree, tree_query, preprocess, list_runs])
     # todo dispatch flag-like commands properly
@@ -69,6 +79,10 @@ def main(
                 print()
             return 0
 
-    runner = Runner(jobs, pin_cpu)
-    runner.run(file)
+    with Pool(1, None) as pool:
+        runner = Runner(pool, keep_files=keep)
+        runner.run(file, dry=dry)
+
+        if keep:
+            print(f"Temporary build files written to: {runner.build_dir.name}")
     return 0

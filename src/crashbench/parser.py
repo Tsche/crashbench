@@ -14,7 +14,7 @@ from colorama import Back, Fore, Style
 from tree_sitter import Language, Node, Parser
 
 from .builtins import BINARY_OPERATORS, BUILTINS, UNARY_OPERATORS
-from .compilers import builtin, COMPILERS, COMPILER_BUILTINS, is_valid_compiler, CompilerFamily
+from .compilers import builtin, COMPILERS, COMPILER_BUILTINS, is_valid_compiler, Compiler
 from .exceptions import ParseError, UndefinedError
 from .util import proxy
 
@@ -97,7 +97,7 @@ class Diagnostics:
         self.source_path = source_path
         self.source_lines = source.splitlines()
 
-    def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Node | None):
+    def emit_diagnostic(self, level: DiagnosticLevel.Level, message: str, node: Optional[Node] = None):
         if node is None:
             # we didn't get a node - output without line/column information
             stderr.write(level.format(None, -1, -1, message))
@@ -136,10 +136,10 @@ class Diagnostics:
             stderr.write(f"{start_row + idx:^5}| {line}\n")
             stderr.write(f"{' ' * 5}| {error_line}\n")
 
-    def emit_warning(self, message: str, node: Node):
+    def emit_warning(self, message: str, node: Optional[Node] = None):
         self.emit_diagnostic(DiagnosticLevel.WARNING, message, node)
 
-    def emit_error(self, message: str, node: Node):
+    def emit_error(self, message: str, node: Optional[Node] = None):
         self.emit_diagnostic(DiagnosticLevel.ERROR, message, node)
 
 
@@ -239,6 +239,7 @@ class VariableScope(Scope):
                 assert node.named_children[0].text is not None, "Invalid text node"
 
                 return ParseResult(node.named_children[0].text.decode(), node)
+
             case "number_literal":
                 # TODO integer literal suffixes
                 # TODO hex, octal, binary literals
@@ -249,20 +250,26 @@ class VariableScope(Scope):
                     return float(text) if "." in text else int(text)
                 except ValueError:
                     return text
+
             case "char_literal":
                 assert node.named_child_count == 1
                 assert node.named_children[0].text is not None, "Invalid text node"
 
                 return node.named_children[0].text.decode()
+
             case "concatenated_string":
                 # TODO ensure all children are string_literal or concatenated_string
                 return "".join(self.parse(child) for child in node.named_children)
+
             case "true":
                 return ParseResult(True, node)
+
             case "false":
                 return ParseResult(False, node)
+
             case "null":
                 return ParseResult(None, node)
+
             case "call_expression":
                 name_node = node.child_by_field_name("function")
                 assert name_node is not None, "Could not parse function name"
@@ -272,7 +279,7 @@ class VariableScope(Scope):
 
                 return self.parse_call(name_node, argument_list)
 
-            case "identifier":
+            case type_ if type_ in ("identifier", "namespace_identifier", "type_identifier"):
                 assert node.text is not None, "Invalid text node"
                 ident = node.text.decode()
                 return Variable(ident, node)
@@ -449,28 +456,29 @@ class Conditional:
 
 
 class CompilerSetting:
-    def __init__(self, compiler: CompilerFamily, settings: Optional[dict[str, Any]] = None):
+    def __init__(self, compiler: type[Compiler], settings: Optional[dict[str, Any]] = None):
         self.compiler = compiler
         self.settings: dict[str, Any] = settings or {}
         self.assertions: list[Any] = []
 
     def has_builtin(self, name: str) -> bool:
-        return name in COMPILER_BUILTINS[type(self.compiler)]
-
-    def run_builtin(self, name: str, *args, **kwargs) -> Any:
-        return COMPILER_BUILTINS[type(self.compiler)][name](self.compiler, *args, **kwargs)
+        return name in COMPILER_BUILTINS[self.compiler]
 
     def merge(self, global_settings: dict[str, Any]) -> dict[str, Any]:
-        return dict(**global_settings, **self.settings)
+        return global_settings | self.settings
 
     def add(self, key: str, value: tuple[list, dict]):
-        if key not in COMPILER_BUILTINS[type(self.compiler)]:
+        if key not in COMPILER_BUILTINS[self.compiler]:
             return False
 
-        target_builtin = COMPILER_BUILTINS[type(self.compiler)][key]
-        if getattr(target_builtin, "assertion", False):
+        target_builtin = COMPILER_BUILTINS[self.compiler][key]
+        if getattr(target_builtin, "repeatable", False):
             args, kwargs = value
-            self.assertions.append((key, args, kwargs))
+            
+            if key not in self.settings:
+                self.settings[key] = []
+
+            self.settings[key].append((args, kwargs))
         else:
             self.settings[key] = value
 
@@ -481,14 +489,12 @@ class CompilerSetting:
 
 
 class SettingScope(VariableScope):
-    builtins: dict[str, Callable] = {}
-
     def __init__(self, parent: Optional["SettingScope"] = None, data: dict[str, Any] | None = None):
         super().__init__(parent, data)
 
         # deep copy compiler configurations
         self.compilers: dict[str, CompilerSetting] = (
-            {compiler.name: CompilerSetting(compiler()) for compiler in COMPILERS} if parent is None else
+            {compiler.name: CompilerSetting(compiler) for compiler in COMPILERS} if parent is None else
             {key: settings.copy() for key, settings in parent.compilers.items()})
 
     def parse_setting(self, name_node: Node, argument_list: Node, log: Diagnostics):
@@ -505,7 +511,7 @@ class SettingScope(VariableScope):
                 self.compilers[name].add(key, ([value], {}))
             return True
 
-        if name in SettingScope.builtins:
+        if name in COMPILER_BUILTINS[SettingScope]:
             # affect all compilers
             self.add(name, (args, kwargs))
             return True
@@ -519,18 +525,20 @@ class SettingScope(VariableScope):
 
         return found
 
-    def run_builtin(self, compiler_name: str, name: str, *args, **kwargs) -> Any:
-        compiler = self.compilers.get(compiler_name)
-        assert compiler is not None
-
-        return compiler.run_builtin(name, *args, **kwargs)
+    def run_builtin(self, compiler: type[Compiler], name: str, *args, **kwargs) -> Any:
+        return COMPILER_BUILTINS[compiler][name](compiler, *args, **kwargs)
 
     def effective_configurations(self):
         for settings in self.compilers.values():
-            compilers = settings.compiler.detected.copy()
-            for config, (args, kwargs) in settings.merge(self.all).items():
-                if settings.has_builtin(config):
-                    compilers = settings.run_builtin(config, compilers, *args, **kwargs)
+            compilers = settings.compiler.discover()
+            effective_config = self.all | settings.settings
+            for config, value in effective_config.items():
+                if not settings.has_builtin(config):
+                    continue
+
+                for args, kwargs in value if isinstance(value, list) else [value]:
+                    compilers = self.run_builtin(settings.compiler, config, compilers, *args, **kwargs)
+
             yield from compilers
 
     @builtin
@@ -882,13 +890,13 @@ class TranslationUnit(ParseContext):
     @staticmethod
     def from_file(path: Path):
         assert path.exists()
-        return TranslationUnit.from_source(path.read_bytes())
+        return TranslationUnit.from_source(path.read_bytes(), path)
 
     @staticmethod
     def from_source(source: str | bytes, path: Optional[Path] = None):
         logger = Diagnostics(source if isinstance(source, str) else source.decode("utf-8"), path)
         try:
-            tu = TranslationUnit(source, logger)
+            tu = TranslationUnit(source, path, logger=logger)
             tu.parse(tu.tree)
             return tu
 

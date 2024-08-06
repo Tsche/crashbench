@@ -18,6 +18,8 @@ def json_default(thing):
 
     if isinstance(thing, datetime):
         return thing.isoformat(timespec="microseconds")
+    elif isinstance(thing, Path):
+        return str(thing)
 
     raise TypeError(f"object of type {type(thing).__name__} not json serializable")
 
@@ -34,6 +36,17 @@ def fnv1a(data: Any):
 def as_json(data: Any):
     return json.dumps(data, default=json_default)
 
+def to_base58(number: int):
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    if not number:
+        return alphabet[0]
+
+    ret = ""
+    base = len(alphabet)
+    while number:
+        number, index = divmod(number, base)
+        ret = alphabet[index:index+1] + ret
+    return ret
 
 def which(query: re.Pattern | str, extra_search_paths: Optional[list[str]] = None):
     query = re.compile(query) if isinstance(query, str) else query

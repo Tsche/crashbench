@@ -5,12 +5,12 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from crashbench.util import run
+from crashbench.util import fnv1a, run, to_base58
 
-from .compiler import Compiler, CompilerFamily, Dialect, builtin
+from .compiler import Compiler, Compiler, Dialect, builtin
 
 
-class GCC(CompilerFamily):
+class GCC(Compiler):
     has_gnu_extensions = True
     executable_pattern = r"^gcc(-[0-9]+)?(\.exe|\.EXE)?$"
     version_pattern = re.compile(
@@ -23,7 +23,9 @@ class GCC(CompilerFamily):
     )
 
     @classmethod
+    @cache
     def get_compiler_info(cls, compiler: Path) -> dict[str, str]:
+        print("RUNNING")
         # invoke gcc -v --version
         result = run([str(compiler), "-v", "--version"])
 
@@ -36,6 +38,7 @@ class GCC(CompilerFamily):
         return info
 
     @staticmethod
+    @cache
     def get_supported_dialects(compiler: Path):
         standards = defaultdict(list)
         # invoke gcc -v --help
@@ -77,6 +80,9 @@ class GCC(CompilerFamily):
             return []
         raise ValueError(f"Language {language} is not supported.")
 
+    def set_output(self, path: Optional[Path]):
+        self.add_option('o', str(path))
+
     @staticmethod
     def select_dialect(dialect: Dialect) -> str:
         return f'-std={dialect.name}'
@@ -86,6 +92,13 @@ class GCC(CompilerFamily):
         if isinstance(value, bool):
             value = int(value)
         return f"-D{name}" if value is None else f"-D{name}={value}"
+
+    @staticmethod
+    def setting(name: str, value: None | str | bool = None) -> str:
+        if isinstance(value, bool):
+            return f"-{name}" if value else f"-no-{name}"
+
+        return f"-{name}" if value is None else f"-{name}={value}"
 
     @builtin
     def gnu_extensions(self, compilers: list[Compiler], enabled: bool):

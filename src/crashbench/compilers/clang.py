@@ -14,8 +14,10 @@ class Clang(GCC):
     executable_pattern     = r"clang(-[0-9]+)?(\.exe|\.EXE)?$"
 
     @staticmethod
+    @cache
     def get_supported_dialects(compiler: Path):
         result = run([str(compiler), "-xc++", "-std=dummy", "-"])
+        ret = []
         for line in result.stderr.splitlines():
             standard_match = re.search(Clang.standard_pattern, line)
             if standard_match is None:
@@ -28,7 +30,8 @@ class Clang(GCC):
             aliases = [
                 match["alias"] for match in Clang.standard_alias_pattern.finditer(line)
             ]
-            yield Dialect(standard, aliases)
+            ret.append(Dialect(standard, aliases))
+        return ret
 
     @builtin
     def trace(self, compilers: list[Compiler], enabled: bool):

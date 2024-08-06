@@ -5,17 +5,6 @@ from typing import Any, TypeAlias, TypeVar
 from .sysinfo import SYSTEM_INFO, SYSTEM_INFO_HASH, SystemInfoHash
 from .util import fnv1a
 
-@dataclass
-class Compiler:
-    family: str  # gcc/clang/msvc
-    version: str
-    dialect: str  # selected C++ standard
-    options: tuple[str]  # compile options, excluding macro definitions
-
-    def __post_init__(self):
-        self.options = tuple(sorted(self.options))
-
-
 CompilerHash: TypeAlias = int
 
 Variables: TypeAlias = dict[str, str]
@@ -37,6 +26,17 @@ class HashedDict(dict[int, V]):
         key = fnv1a(item)
         if key not in self:
             self[key] = item
+
+@dataclass
+class Compiler:
+    family: str  # gcc/clang/msvc
+    version: str
+    dialect: str  # selected C++ standard
+    options: tuple[str]  # compile options, excluding macro definitions
+
+    def __post_init__(self):
+        self.options = tuple(sorted(self.options))
+
 @dataclass
 class Run:
     variables: Variables

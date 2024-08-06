@@ -23,7 +23,8 @@
 
 int main(){
     [[benchmark("bench")]] {
-        [[Clang::standard(">20")]];
+        // [[standard("17")]];
+        [[Clang::standard("17")]];
         // [[Clang::trace(false)]];
         [[BAR::var(true)]];
         [[FOO::range(5)]];
@@ -35,5 +36,6 @@ int main(){
         // [[Clang(version=">=12.0", trace=true)]];
         [[error("error text", regex=false)]];
         [[GCC::error("foo2")]];
+        [[GCC::link(true)]];
     }
 }

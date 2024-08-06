@@ -13,7 +13,7 @@ template <typename T, typename... Ts> struct GetImpl<0, T, Ts...> {
 };
 
 template <std::size_t Idx, typename... Ts>
-using get = GetImpl<Idx, Ts...>::type;
+using get = typename GetImpl<Idx, Ts...>::type;
 } // namespace recursive
 
 namespace inheritance1 {
@@ -47,7 +47,7 @@ struct GetHelper<std::index_sequence<Idx...>, Ts...> : Tagged<Idx, Ts>... {
 };
 
 template <std::size_t Idx, typename... Ts>
-using get = decltype(GetHelper<std::index_sequence_for<Ts...>, Ts...>{}(
+using get = typename decltype(GetHelper<std::index_sequence_for<Ts...>, Ts...>{}(
     std::integral_constant<std::size_t, Idx>{}))::type;
 } // namespace inheritance2
 
@@ -231,7 +231,7 @@ struct GetImpl<Idx, List<Ts...>> {
 
 template <typename...> struct List {};
 template <std::size_t Idx, typename... Ts>
-using get = GetImpl<Idx, List<Ts...>>::type;
+using get = typename GetImpl<Idx, List<Ts...>>::type;
 } // namespace paging
 
 namespace nested {
@@ -270,21 +270,28 @@ using get = __type_pack_element<Idx, Ts...>;
 #error "No pack index builtin detected"
 #endif
 
+// #ifdef __clang__
+// // currently only clang supports this
 // namespace cpp26 {
 // template <std::size_t Idx, typename... Ts> using get = Ts...[Idx];
 // } // namespace cpp26
+// #endif
 
 template <auto> struct Dummy {};
 
 template <template <std::size_t, typename...> class getter, std::size_t... Idx>
 void run(std::index_sequence<Idx...>) {
-  static_assert((std::same_as<getter<Idx, Dummy<Idx>...>, Dummy<Idx>> && ...));
+  static_assert((std::same_as<getter<Idx, Dummy<Idx>...>, Dummy<Idx>> && ...), "");
 }
+
+[[language("c++")]];
+[[standard("c++23")]];
+// [[Clang(standard="c++26")]];
 
 int main() {
   [[benchmark("type_at")]] {
-    [[STRATEGY::list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
-    [[COUNT::range(0, 2)]];
+    [[using STRATEGY: list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
+    [[using COUNT:    range(1, 10)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});
   }

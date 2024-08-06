@@ -1,9 +1,9 @@
 from functools import cached_property
-from .compiler import CompilerFamily
+from .compiler import Compiler
 
-class MSVC(CompilerFamily):
+class MSVC(Compiler):
     @cached_property
-    def detected(self):
+    def discover(self):
         return []
 
     # @builtin
