@@ -7,7 +7,7 @@ import signal
 from tempfile import TemporaryDirectory
 import time
 import traceback
-from typing import Any, Optional
+from typing import Any, Optional, SupportsIndex, TypeVar
 
 import click
 import psutil
@@ -15,6 +15,7 @@ import psutil
 from .parser import Test, TranslationUnit
 from .compilers import Compiler
 from .util import Result, fnv1a, run, to_base58
+
 
 def progressbar_status(shutdown_event: EventClass, output_queue: Queue, total: int):
     with click.progressbar(length=total, show_pos=True, show_percent=False, show_eta=True) as progressbar:
@@ -44,7 +45,6 @@ class Worker(Process):
             print(f"error in {current_process().name}: {exc}")
             self._child.send((exc, trace))
 
-
     @property
     def exception(self):
         if self._parent.poll():
@@ -54,6 +54,7 @@ class Worker(Process):
     @property
     def has_exception(self):
         return (self._exception or self.exception) is not None
+
 
 def worker_task(shutdown_event: EventClass,
                 process_event: EventClass,
@@ -82,8 +83,7 @@ class Pool:
     def __init__(self, num_jobs: int, pin_cpu: Optional[list[int | None]] = None):
         self.num_jobs = num_jobs
         self.manager = Manager()
-        self.tasks: JoinableQueue = JoinableQueue()
-        # self.results: Queue = Queue()
+        self.tasks = self.manager.Queue()
         self.shutdown_event = self.manager.Event()
         self.process_event = self.manager.Event()
 
@@ -102,7 +102,6 @@ class Pool:
             worker.start()
 
     def join(self):
-        self.tasks.cancel_join_thread()
         self.shutdown_event.set()
         for worker in self.workers:
             worker.join()
@@ -113,20 +112,27 @@ class Pool:
 
     def __exit__(self, type_, value, traceback):
         self.join()
-        self.tasks.cancel_join_thread()
         self.shutdown_event.set()
         for worker in self.workers:
             worker.kill()
 
-    def run_tasks(self, tasks: list[Any], timeout: Optional[float] = None, observer=None):
-        # assert self.results.empty()
+    def retrieve_results(self, results: queue.Queue, amount: int, timeout: Optional[float] = None):
+        assert results.empty()
+
+    def clear_tasks(self):
+        self.process_event.clear()
+        while not self.tasks.empty():
+            try:
+                self.tasks.get(block=False)
+            except queue.Empty:
+                break
         assert self.tasks.empty()
-        shutdown_observer = self.manager.Event()
+
+    def run_tasks(self, tasks: list[Any], timeout: Optional[float] = None, observer=None, cancel_on_error=True):
+        assert self.tasks.empty()
 
         def cancel(signum, frame):
-            shutdown_observer.set()
             self.shutdown_event.set()
-            self.tasks.cancel_join_thread()
             for worker in self.workers:
                 worker.kill()
 
@@ -135,44 +141,53 @@ class Pool:
         sigint_handler = signal.signal(signal.SIGINT, cancel)
         try:
             results = self.manager.Queue()
-            if observer is not None:
-                observer_proc = Worker(target=observer, args=(shutdown_observer, results, len(tasks)))
-                observer_proc.start()
 
             # enqueue tasks
             for task in tasks:
                 self.tasks.put((results, task), timeout=timeout)
 
-            while not self.tasks.empty():
-                # TODO restart dead workers?
-                if all(worker.has_exception for worker in self.workers):
-                    # all workers died, cancel
-                    raise RuntimeError([worker.exception for worker in self.workers])
-                time.sleep(0.1)
+            self.process_event.set()
 
-            # wait for all tasks to complete
-            self.tasks.join()
-            shutdown_observer.set()
-            observer_proc.join()
-
-            # retrieve results
+            progressbar = click.progressbar(length=len(tasks), show_pos=True, show_percent=False, show_eta=True)
             collected_results = []
-            min_expected_amount = len(tasks) - [worker.has_exception for worker in self.workers].count(True)
+            old_len = 0
             while len(collected_results) != len(tasks):
                 try:
                     evaluated: PendingRun = results.get(timeout=timeout)
                     collected_results.append(evaluated)
+
+                    assert evaluated.result is not None
+                    if cancel_on_error and evaluated.result.returncode != evaluated.compiler.expected_return_code:
+                        self.clear_tasks()
+                        # TODO use custom error to cancel
+                        raise ValueError(evaluated.result)
+
                 except queue.Empty:
                     # cannot dequeue any more from results
-                    if len(collected_results) >= min_expected_amount:
-                        print("warning: did not get full amount of results, some workers errored")
-                        return collected_results
 
-            assert results.empty()
+                    # TODO
+                    dead_workers = []
+                    for idx, worker in enumerate(self.workers):
+                        if not worker.has_exception:
+                            continue
+                        dead_workers.append((idx, worker.exception))
+
+                    if dead_workers:
+                        raise RuntimeError(dead_workers)
+
+                if (length := len(collected_results)) != old_len:
+                    progressbar.update(length - old_len)
+                    old_len = length
+                else:
+                    # no new data received - sleep and try again
+                    time.sleep(0.1)
+
             return collected_results
 
         finally:
+            self.process_event.clear()
             signal.signal(signal.SIGINT, sigint_handler)
+
 
 class PendingRun:
     def __init__(self, configuration: Compiler, source: Path, test_name: str, variables: dict, outpath: Path):
@@ -197,6 +212,7 @@ class PendingRun:
         assert self.result is not None, "Must run test before running assertions against it"
         return self.compiler.run_assertions()
 
+
 class Runner:
     def __init__(self, pool: Optional[Pool] = None, keep_files: bool = False):
         self.pool = pool
@@ -209,7 +225,8 @@ class Runner:
     def compile_commands(self, source: Path, test: Test):
         assert source.exists()
         for configuration in test.settings.effective_configurations():
-            config_hash = fnv1a((configuration.path, configuration.get_compiler_info(configuration.path), configuration.options))
+            config_hash = fnv1a((configuration.path, configuration.get_compiler_info(
+                configuration.path), configuration.options))
             outpath = Path(self.build_dir.name) / test.name / to_base58(config_hash)
 
             for variables in test.runs:
@@ -222,7 +239,6 @@ class Runner:
                 yield command.run()
         else:
             yield from self.pool.run_tasks(compile_commands, observer=progressbar_status)
-
 
     def run(self, source_path: Path, dry: bool = False):
         tu = TranslationUnit.from_file(source_path)
