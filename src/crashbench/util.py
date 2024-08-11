@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from typing import Any, Iterable, Optional, TypeVar
-
+from colorama import Back, Fore, Style
 
 def json_default(thing):
     with contextlib.suppress(TypeError):
@@ -264,3 +264,22 @@ def proxy(mixin: type):
     class Proxy(metaclass=MetaMixin, mixin=mixin): 
         ...
     return Proxy
+
+def decorated(
+    message: Any,
+    fg: Optional[Fore] = None,
+    bg: Optional[Back] = None,
+    style: Optional[Style] = None,
+):
+    if not isinstance(message, str):
+        message = str(message)
+
+    out = []
+    if fg:
+        out.append(fg)
+    if bg:
+        out.append(bg)
+    if style:
+        out.append(style)
+    out.extend((message, Style.RESET_ALL))
+    return "".join(out)

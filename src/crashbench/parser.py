@@ -3,20 +3,21 @@ import contextlib
 import difflib
 from dataclasses import dataclass
 from functools import cached_property
+import importlib
 from itertools import product
 from pathlib import Path
 from pprint import pprint
 from sys import stderr
-from typing import Any, Callable, Iterable, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 
 import tree_sitter_cpp
-from colorama import Back, Fore, Style
+from colorama import Fore, Style
 from tree_sitter import Language, Node, Parser
 
 from .builtins import BINARY_OPERATORS, BUILTINS, UNARY_OPERATORS
 from .compilers import builtin, COMPILERS, COMPILER_BUILTINS, is_valid_compiler, Compiler
 from .exceptions import ParseError, UndefinedError
-from .util import proxy
+from .util import proxy, decorated
 
 # TODO:
 #! - add .node to all possible parse results
@@ -46,23 +47,6 @@ setting_blacklist = [
 ]
 
 
-def decorate(
-    message: str,
-    fg: Optional[Fore] = None,
-    bg: Optional[Back] = None,
-    style: Optional[Style] = None,
-):
-    out = []
-    if fg:
-        out.append(fg)
-    if bg:
-        out.append(bg)
-    if style:
-        out.append(style)
-    out.extend((message, Style.RESET_ALL))
-    return "".join(out)
-
-
 def find_error_node(node: Node):
     assert node.has_error, "Cannot find error node within a node that isn't erroneous"
 
@@ -86,7 +70,7 @@ class DiagnosticLevel:
             return f"{filename.name if filename else '<unknown>'}:{row}:{column}: {self.color}{self.label}:{Fore.RESET} {message}\n"
 
         def colored(self, message: str):
-            return decorate(message, fg=self.color)
+            return decorated(message, fg=self.color)
 
     WARNING = Level("warning", Fore.YELLOW)
     ERROR = Level("error", Fore.RED)
@@ -334,6 +318,23 @@ class VariableScope(Scope):
                 assert node.named_child_count == 1
                 return self.parse(node.named_children[0])
 
+            case "initializer_list":
+                # treat initializer lists as lists
+                return [self.parse(child) for child in node.named_children]
+
+            # TODO
+            # case "field_expression":
+            #     argument_node = node.child_by_field_name("argument")
+            #     assert argument_node is not None
+            #     argument = self.parse(argument_node)
+
+            #     field_node = node.child_by_field_name("field")
+            #     assert field_node is not None
+            #     assert field_node.text is not None
+            #     field = field_node.text.decode()
+
+            #     return getattr(argument.evaluate(self) if hasattr(argument, "evaluate") else argument, field)
+
             case _:
                 raise ParseError(f"Unexpected node type {node.type}", node)
 
@@ -474,7 +475,7 @@ class CompilerSetting:
         target_builtin = COMPILER_BUILTINS[self.compiler][key]
         if getattr(target_builtin, "repeatable", False):
             args, kwargs = value
-            
+
             if key not in self.settings:
                 self.settings[key] = []
 
@@ -563,7 +564,7 @@ class ParseContext:
             raise ParseError(f"Redefining {variable} is not allowed", variable)
 
         if variable_name in self.variables.enclosing_scope:
-            self.log.emit_warning(f"definition of `{decorate(variable_name, style=Style.BRIGHT)}` shadows global definition",
+            self.log.emit_warning(f"definition of `{decorated(variable_name, style=Style.BRIGHT)}` shadows global definition",
                                   variable)
 
         self.variables.add(variable_name, value)
@@ -651,6 +652,10 @@ class ParseContext:
             # special case [[use(ident)]]
             self.parse_use_args(argument_list)
             return True
+        elif name == "import":
+            # special case [[import("package")]];
+            self.parse_import(argument_list)
+            return True
 
         return self.settings.parse_setting(name_node, argument_list, self.log)
 
@@ -672,6 +677,50 @@ class ParseContext:
                                      str(variable), self, is_function=False)
 
             self.used.add(variable)
+
+    def parse_import(self, argument_list: Node):
+        args, kwargs = self.variables.parse_argument_list(argument_list)
+        if len(args) == 0:
+            raise ParseError("Must specify what to import.", argument_list)
+
+        valid_kwargs = ["symbols", "alias"]
+        for key in kwargs:
+            if key in valid_kwargs:
+                continue
+            raise ParseError(f"Unrecognized keyword argument {key}", get_node(key) or argument_list)
+
+        module_name = args[0]
+        symbols = args[1] if len(args) == 2 else kwargs.get("symbols")
+        alias = kwargs.get("alias")
+
+        if not module_name:
+            raise ParseError(f"Invalid package {module_name}", get_node(module_name) or argument_list)
+        if not isinstance(module_name, str):
+            raise ParseError(f"Invalid argument type: {type(module_name).__name__}, expected str",
+                             get_node(module_name) or argument_list)
+
+        module = importlib.import_module(module_name)
+
+        def check_symbol(symbol):
+            if not hasattr(module, symbol):
+                raise ParseError(f"Module {module_name} lacks requested symbol {symbol}",
+                                 get_node(module_name) or argument_list)
+
+        if isinstance(symbols, str):
+            check_symbol(symbols)
+            self.variables[alias or symbols] = getattr(module, symbols)
+
+        elif symbols:
+            if alias and len(symbols) > 1:
+                raise ParseError("Cannot combine alias with more than one explicitly imported symbol",
+                                 get_node(alias) or argument_list)
+
+            for symbol in symbols:
+                check_symbol(symbol)
+                self.variables[symbol] = getattr(module, symbol)
+
+        else:
+            self.variables[alias or module_name] = module
 
     def parse_metavar(self, prefix: Node, name_node: Node, argument_list: Optional[Node]):
         # has namespace prefix => metavar
@@ -818,10 +867,18 @@ class Test(ParseContext):
 
             assert ident_node.text is not None, "Invalid text node"
             ident = ident_node.text.decode()
-            if self.variables.get(ident) is not None:
-                # TODO check if not callable
-                # TODO check if not builtin
-                self.used.add(self.variables.parse(ident_node))
+            if (var := self.variables.get(ident)) is None:
+                continue
+
+            if ident in BUILTINS:
+                # don't mark builtins as used
+                continue
+            
+            if callable(var):
+                # don't mark functions as used
+                continue
+
+            self.used.add(self.variables.parse(ident_node))
 
     @property
     def code(self) -> str:
@@ -908,7 +965,7 @@ class TranslationUnit(ParseContext):
             if similar := exc.scope.nearest_match(exc.name, exc.is_function):
                 # add suggestions
                 start_column = exc.node.range.start_point.column
-                decorated_name = decorate(similar, fg=Fore.GREEN, style=Style.BRIGHT)
+                decorated_name = decorated(similar, fg=Fore.GREEN, style=Style.BRIGHT)
                 logger.emit_error(f"{exc.message}; did you mean `{decorated_name}`?", exc.node)
                 stderr.write(f"{' '*5}| {' '*start_column}{decorated_name}\n")
             else:

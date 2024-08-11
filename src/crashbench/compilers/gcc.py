@@ -5,9 +5,9 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from crashbench.util import fnv1a, run, to_base58
+from crashbench.util import run
 
-from .compiler import Compiler, Compiler, Dialect, builtin
+from .compiler import Compiler, Dialect, builtin
 
 
 class GCC(Compiler):
@@ -21,11 +21,12 @@ class GCC(Compiler):
         r"-std=(?P<standard>[^\s]+)[\s]*(Conform.*(C\+\+( draft)? standard))"
         r"((.|(\n    )\s+)*Same.as(.|(\n    )\s+)*-std=(?P<alias>[^\. ]+))?"
     )
+    default_option_separator = '='
+    option_prefix = '-'
 
     @classmethod
     @cache
     def get_compiler_info(cls, compiler: Path) -> dict[str, str]:
-        print("RUNNING")
         # invoke gcc -v --version
         result = run([str(compiler), "-v", "--version"])
 
@@ -72,33 +73,14 @@ class GCC(Compiler):
     #     for version, compiler in c_compilers.items():
     #         yield GCC(compiler,  cpp_compilers.get(version))
 
-    @staticmethod
-    def select_language(language: str) -> list[str]:
-        if language == 'c++':
-            return ['-xc++', '-lstdc++']
-        elif language == 'c':
-            return []
-        raise ValueError(f"Language {language} is not supported.")
-
     def set_output(self, path: Optional[Path]):
-        self.add_option('o', str(path))
-
-    @staticmethod
-    def select_dialect(dialect: Dialect) -> str:
-        return f'-std={dialect.name}'
+        self.add_option('o', str(path), separator='')
 
     @staticmethod
     def define(name: str, value: Optional[Any] = None) -> str:
         if isinstance(value, bool):
             value = int(value)
         return f"-D{name}" if value is None else f"-D{name}={value}"
-
-    @staticmethod
-    def setting(name: str, value: None | str | bool = None) -> str:
-        if isinstance(value, bool):
-            return f"-{name}" if value else f"-no-{name}"
-
-        return f"-{name}" if value is None else f"-{name}={value}"
 
     @builtin
     def gnu_extensions(self, compilers: list[Compiler], enabled: bool):

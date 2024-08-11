@@ -291,7 +291,7 @@ void run(std::index_sequence<Idx...>) {
 int main() {
   [[benchmark("type_at")]] {
     [[using STRATEGY: list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
-    [[using COUNT:    range(1, 10)]];
+    [[using COUNT:    range(1, 5)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});
   }

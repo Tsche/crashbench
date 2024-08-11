@@ -19,7 +19,7 @@ from .compilers import COMPILERS, Compiler
 @click.option("--dry", type=bool, is_flag=True, default=False)
 @click.option("--keep", type=bool, is_flag=True, default=False)
 @click.option("--pin-cpu", type=str, default=None)
-@click.option("--jobs", type=int, default=None)
+@click.option("--jobs", type=int, default=0)
 @click.argument("file", type=Path, required=False)
 @click.pass_context
 def main(
@@ -33,7 +33,7 @@ def main(
     dry: bool,
     keep: bool,
     pin_cpu: Optional[str],
-    jobs: Optional[int],
+    jobs: int,
     file: Optional[Path],
 ) -> int:
     if system_info:
@@ -79,7 +79,8 @@ def main(
                 print()
             return 0
 
-    with Pool(1, None) as pool:
+    # TODO parse cpu pinning argument
+    with Pool(num_jobs=jobs, pin_cpu=None) as pool:
         runner = Runner(pool, keep_files=keep)
         runner.run(file, dry=dry)
 

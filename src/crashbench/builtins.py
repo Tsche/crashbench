@@ -118,11 +118,12 @@ BUILTINS = {
     'var': var,
 
     'str': str,
-    'int': int,
+    'int_': int,
     'list': make_list,
-    'float': float,
-    'bool': bool,
+    'float_': float,
+    'bool_': bool,
 
+    'split': str.split,
     'join': str.join,
     'prefix_each': prefix_each,
     'suffix_each': suffix_each,

@@ -1,6 +1,7 @@
+from dataclasses import dataclass
 import os
 from abc import ABC, abstractmethod
-from functools import cache, cached_property
+from functools import cache
 from pathlib import Path
 import re
 from typing import Any, Callable, Iterable, Optional, Self
@@ -111,23 +112,31 @@ def builtin(fnc=None, repeatable: bool = False):
 
     return Builtin if fnc is None else Builtin(fnc)
 
+@dataclass(frozen=True)
+class Option:
+    name: str
+    value: Any = None
+    separator: Optional[str] = None
+
+    def __str__(self):
+        return f"{self.name}{self.separator or ''}{self.value or ''}"
 
 class Compiler(ABC):
     name: str
 
     def __init__(self, path: Path,
                  language: Optional[str] = None,
-                 options: Optional[dict[str, str | None]] = None,
+                 options: Optional[dict[str, Option]] = None,
                  assertions: Optional[list[Any]] = None,
                  warnings: Optional[dict[str, bool]] = None):
 
         self.path = path
         self.language = language or 'c++'
-        self.options: dict[str, str | None] = options or {
-            'c': None  # disable linking by default
+        self.options: dict[str, Option] = options.copy() if options else {
+            'c': Option('c')  # disable linking by default
         }
-        self.assertions: list[Any] = assertions or []
-        self.warnings: dict[str, bool] = warnings or {}
+        self.assertions: list[Any] = assertions.copy() if assertions else []
+        self.warnings: dict[str, bool] = warnings.copy() if warnings else {}
         self.expected_return_code: int = 0
 
     @property
@@ -138,8 +147,9 @@ class Compiler(ABC):
         return type(self)(self.path, self.language,
                           self.options.copy(), self.assertions.copy(), self.warnings.copy())
 
-    def add_option(self, option: str, value: Optional[Any] = None):
-        self.options[option] = value
+    def add_option(self, option: str, value: Optional[Any] = None, separator = None):
+        default_separator = getattr(self, "default_option_separator", " ")
+        self.options[option] = Option(option, value, default_separator if separator is None else separator)
         return self
 
     def remove_option(self, option: str):
@@ -199,7 +209,7 @@ class Compiler(ABC):
         return Version(self.get_compiler_info(self.path)['version']) in selector
 
     def __repr__(self):
-        return f'{self.name}({self.path} {" ".join(self.setting(key, value) for key, value in self.options.items())})'
+        return f'{self.name}({self.path})'
 
     def __str__(self):
         return self.__class__.__name__
@@ -239,22 +249,7 @@ class Compiler(ABC):
 
     @staticmethod
     @abstractmethod
-    def select_language(language: str) -> list[str]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def select_dialect(dialect: Dialect) -> str:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
     def define(name: str, value: Optional[Any] = None) -> str:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def setting(name: str, value: Optional[Any] = None) -> str:
         raise NotImplementedError
 
     @builtin(repeatable=True)
@@ -296,7 +291,7 @@ class Compiler(ABC):
 
     # @classmethod
     @builtin
-    def link(self, compilers: list['Compiler'], enable: bool):
+    def link(cls, compilers: list['Compiler'], enable: bool):
         for compiler in compilers:
             yield compiler.remove_option('c') if enable else compiler.add_option('c')
 
@@ -307,12 +302,12 @@ class Compiler(ABC):
     def compile_command(self, source: Path, outpath: Path, test: str, *options, variables: Optional[dict[str, Any]] = None):
         var_hash = fnv1a(variables)
         if outpath.is_dir() or (not outpath.exists() and '.' not in outpath.name):
-            self.set_output(outpath / to_base58(var_hash))
+            self.set_output(outpath / f"{to_base58(var_hash)}.o")
 
         return [
             str(self.path),
             str(source),
-            *[self.setting(option, value) for option, value in self.options.items()],
+            *[getattr(self, "option_prefix") + str(option) for option in self.options.values()],
             *options,
             self.define(test.upper()),
             *[self.define(option, value) for option, value in (variables or {}).items()]
