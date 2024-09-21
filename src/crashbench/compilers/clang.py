@@ -34,11 +34,11 @@ class Clang(GCC):
         return ret
 
     @builtin
-    def trace(self, compilers: list[Compiler], enabled: bool):
+    def trace(cls, compilers: list[Compiler], enabled: bool):
         if not enabled:
             return compilers
 
         for compiler in compilers:
-            compiler.add_option("-ftime-trace")
-
-        return compilers
+            compiler.add_option("ftime-trace")
+            compiler.extra_files.append("{}.json")
+            yield compiler

@@ -1,3 +1,4 @@
+from . import report
 from multiprocessing import JoinableQueue, Manager, Pipe, Process, Queue, current_process, cpu_count
 from multiprocessing.synchronize import Event as EventClass
 from pathlib import Path
@@ -6,7 +7,7 @@ import signal
 from tempfile import TemporaryDirectory
 import time
 import traceback
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import click
 from colorama import Fore, Style
@@ -27,6 +28,7 @@ def progressbar_status(shutdown_event: EventClass, output_queue: Queue, total: i
         # finally set progressbar to 100%
         progressbar.update(total - progressbar.pos)
 
+
 class PendingRun:
     def __init__(self, configuration: Compiler, source: Path, test_name: str, variables: dict, outpath: Path):
         self.compiler = configuration
@@ -44,12 +46,17 @@ class PendingRun:
 
     def run(self):
         self.outpath.mkdir(exist_ok=True, parents=True)
-        self.result = run(self.command)
+        for _ in range(5):
+            result = run(self.command)
+            if not self.result or self.result.elapsed_ms > result.elapsed_ms:
+                # pick the best result out of all reruns
+                self.result = result
         return self
 
     def run_assertions(self):
         assert self.result is not None, "Must run test before running assertions against it"
         return self.compiler.run_assertions()
+
 
 class Cancelled(Exception):
     def __init__(self, reason: str, run: Optional[PendingRun] = None):
@@ -66,7 +73,7 @@ class Cancelled(Exception):
             if self.run.result is None:
                 return
             yield f"  Return Code: {decorated(self.run.result.returncode, fg=Fore.RED)}" \
-                  f" (expected {decorated(self.run.compiler.expected_return_code, fg=Fore.GREEN)})"
+                f" (expected {decorated(self.run.compiler.expected_return_code, fg=Fore.GREEN)})"
             yield decorated("STDERR", style=Style.BRIGHT)
             yield self.run.result.stderr
             yield decorated("STDOUT", style=Style.BRIGHT)
@@ -113,6 +120,7 @@ def worker_task(shutdown_event: EventClass,
     if pin is not None:
         this_process = psutil.Process()
         this_process.cpu_affinity([pin])
+        # TODO pin actual subprocesses to cpu
 
     while not shutdown_event.is_set():
         if not process_event.wait(timeout=0.1):
@@ -126,6 +134,7 @@ def worker_task(shutdown_event: EventClass,
             input_queue.task_done()
         except queue.Empty:
             pass
+
 
 class Pool:
     def __init__(self, num_jobs: int, pin_cpu: Optional[list[int | None]] = None):
@@ -160,12 +169,6 @@ class Pool:
 
     def __exit__(self, type_, value, traceback):
         self.join()
-        self.shutdown_event.set()
-        for worker in self.workers:
-            worker.kill()
-
-    def retrieve_results(self, results: queue.Queue, amount: int, timeout: Optional[float] = None):
-        assert results.empty()
 
     def clear_tasks(self):
         while not self.tasks.empty():
@@ -175,7 +178,10 @@ class Pool:
                 break
         assert self.tasks.empty()
 
-    def run_tasks(self, tasks: list[Any], timeout: Optional[float] = None, observer=None, cancel_on_error=True):
+    def run_tasks(self, tasks: Iterable[Any], timeout: Optional[float] = None, cancel_on_error=True):
+        if not isinstance(tasks, list):
+            # evaluate task list - its size must be known
+            tasks = list(tasks)
         assert self.tasks.empty()
 
         def cancel(signum, frame):
@@ -208,7 +214,6 @@ class Pool:
                         print("error: task failed - cancelling")
                         self.process_event.clear()
                         self.clear_tasks()
-                        # TODO use custom error to cancel
                         raise Cancelled("Task failed.", evaluated)
 
                 except queue.Empty:
@@ -222,7 +227,9 @@ class Pool:
                         dead_workers.append((idx, worker.exception))
 
                     if dead_workers:
-                        raise RuntimeError(dead_workers)
+                        # TODO
+                        print(dead_workers)
+                        raise Cancelled("All workers died")
 
                 if (length := len(collected_results)) != old_len:
                     progressbar.update(length - old_len)
@@ -231,6 +238,7 @@ class Pool:
                     # no new data received - sleep and try again
                     time.sleep(0.1)
 
+            print()  # print a newline after the progressbar
             return collected_results
 
         finally:
@@ -243,50 +251,55 @@ class Runner:
         self.pool = pool
         self.build_dir = TemporaryDirectory("crashbench", delete=not keep_files)
 
-        # if platform.system() != 'Linux' and pin_cpu is not None:
-        #     logging.warning("CPU pinning is currently only supported for Linux. This setting will be ignored.")
-        #     self.pin_cpu = None
-
-    def compile_commands(self, source: Path, test: Test):
+    def compile_commands(self, source: Path, test: Test, compiler: Compiler):
         assert source.exists()
-        for configuration in test.settings.effective_configurations():
-            config_hash = fnv1a((configuration.path,
-                                 configuration.get_compiler_info(configuration.path),
-                                 configuration.options))
-            outpath = Path(self.build_dir.name) / test.name / to_base58(config_hash)
+        outpath = Path(self.build_dir.name) / test.name / to_base58(compiler.hash)
+        for variables in test.runs:
+            yield PendingRun(compiler, source, test.name, variables, outpath)
 
-            for variables in test.runs:
-                yield PendingRun(configuration, source, test.name, variables, outpath)
-
-    def run_test(self, source: Path, test: Test):
-        compile_commands = list(self.compile_commands(source, test))
-
+    def run_commands(self, compile_commands: Iterable[PendingRun]):
         if self.pool is None:
             for command in compile_commands:
                 yield command.run()
         else:
-            yield from self.pool.run_tasks(compile_commands, observer=progressbar_status)
+            yield from self.pool.run_tasks(compile_commands)
+
+    def run_test(self, source: Path, test: Test):
+        for configuration in test.settings.effective_configurations():
+            print(configuration)
+            compile_commands = list(self.compile_commands(source, test, configuration))
+            yield from self.run_commands(compile_commands)
 
     def run(self, source_path: Path, dry: bool = False):
         tu = TranslationUnit.from_file(source_path)
         processed_path = Path(self.build_dir.name) / source_path.name
         processed_path.write_text(tu.source)
+        output = report.Report(source_path)
+
         try:
             for test in tu.tests:
                 print(f"Running test {decorated(test.name, style=Style.BRIGHT)}")
+                for configuration in test.settings.effective_configurations():
+                    print(configuration)
+                    compile_commands = list(self.compile_commands(processed_path, test, configuration))
 
-                if dry:
-                    runs = list(self.compile_commands(processed_path, test))
-                    for run in runs:
-                        print(run)
-                    continue
+                    if dry:
+                        for command in compile_commands:
+                            print(command)
+                        continue
 
-                results = list(self.run_test(processed_path, test))
-                for result in results:
-                    print("RESULT")
-                    print(result.result)
-                    result.run_assertions()
-            return True
+                    for processed in self.run_commands(compile_commands):
+                        var_hash = to_base58(fnv1a(processed.variables))
+                        output.add_result(processed.compiler,
+                                          test.name,
+                                          processed.variables,
+                                          processed.result,
+                                          list(processed.compiler.expand_extra_files(processed.outpath, var_hash)))
+
+                        # print(f"{run.compiler} {run.variables!s: <50}: {int(run.result.elapsed_ms)}ms")
+                        # run.run_assertions()
         except Cancelled as cancellation:
             print(cancellation.explain())
-            return False
+            return
+
+        return output

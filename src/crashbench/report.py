@@ -1,83 +1,92 @@
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+import json
 from pathlib import Path
-from typing import Any, TypeAlias, TypeVar
+from typing import Any, Optional, TypeAlias, TypeVar
 
-from .sysinfo import SYSTEM_INFO, SYSTEM_INFO_HASH, SystemInfoHash
-from .util import fnv1a
+from .sysinfo import SYSTEM_INFO, SYSTEM_INFO_HASH, SystemInfo, SystemInfoHash
+from .util import Result, as_json, fnv1a, to_base58
+
+from .parser import Compiler
 
 CompilerHash: TypeAlias = int
 
 Variables: TypeAlias = dict[str, str]
 VariablesHash: TypeAlias = int
 
-Results: TypeAlias = list[int]
+
+class Hash:
+    __slots__ = ['data']
+
+    def __init__(self, data: Any):
+        self.data: int = fnv1a(data)
+
+    def __str__(self):
+        return to_base58(self.data)
+
+    def __eq__(self, other): 
+        if isinstance(other, Hash):
+            return self.data == other.data
+        return self.data == other
+
+    def __hash__(self):
+        return hash(self.data)
+
 
 V = TypeVar("V")
 
 
-class HashedDict(dict[int, V]):
-    def __getitem__(self, key: int | V | Any) -> V:
-        # key may be Any to support foreign keys
-        if not isinstance(key, int):
-            key = fnv1a(key)
-        return super().__getitem__(key)
-
-    def append(self, item: V):
-        key = fnv1a(item)
-        if key not in self:
-            self[key] = item
-
 @dataclass
-class Compiler:
+class CompilerInfo:
     family: str  # gcc/clang/msvc
-    version: str
-    dialect: str  # selected C++ standard
-    options: tuple[str]  # compile options, excluding macro definitions
+    version: dict[str, str]
+    path: str  #
+    options: tuple[str, ...]  # compile options, excluding macro definitions
 
-    def __post_init__(self):
-        self.options = tuple(sorted(self.options))
+    def __init__(self, compiler: Compiler):
+        self.family = compiler.name
+        self.version =  compiler.get_compiler_info(compiler.path)
+        self.path = str(compiler.path)
+        options: list[str] = [str(option) for key, option in compiler.options.items() if key != 'o']
+        self.options = tuple(sorted(options))
+
 
 @dataclass
 class Run:
     variables: Variables
-    results: dict[CompilerHash, Results]
-
-@dataclass
-class Test:
-    runs: list[Run]
+    results: Result
+    extra_files: list[Path] = field(default_factory=list)
 
 @dataclass
 class Report:
     file: Path
-    system: dict[str, str | int] =  field(default_factory=SYSTEM_INFO)
-    compilers: HashedDict[Compiler] = field(default_factory=HashedDict)
-    tests: list[Test] = field(default_factory=list)
+    system: SystemInfo = field(default_factory=lambda: SYSTEM_INFO)
+    compilers: dict[Hash, CompilerInfo] = field(default_factory=dict)
+    tests: dict[str, dict[Hash, list[Run]]] = field(default_factory=dict)
 
-    def add_compiler(self, compiler: Compiler):
-        hash_value = fnv1a(compiler)
+    def add_compiler(self, compiler: CompilerInfo):
+        hash_value = Hash(compiler)
         if hash_value not in self.compilers:
             self.compilers[hash_value] = compiler
 
-@dataclass
-class Commit:
-    commit_id: str
-    results: list[Report]
+    def add_result(self, compiler: Compiler, test: str, variables: Variables, result: Result, extra_files: Optional[list[Path]] = None):
+        compiler_info = CompilerInfo(compiler)
+        compiler_hash = Hash(compiler_info)
+        if compiler_hash not in self.compilers:
+            self.compilers[compiler_hash] = compiler_info
 
+        if test not in self.tests:
+            self.tests[test] = {}
 
-# if __name__ == "__main__":
-#     compilers = HashedDict()
-#     compilers.append(Compiler("gcc", "14", "26", ("-O3", "-W")))
-#     compilers.append(Compiler("clang", "19", "26", ("-O3",)))
-#     tests = [Test([
-#             Run({"COUNT": 1, "STRATEGY": "recursive"}, HashedDict({
-#                 fnv1a(Compiler("gcc", "14", "26", ("-O3",))): [200, 203, 201],
-#                 fnv1a(Compiler("clang", "19", "26", ("-O3",))): [420, 353, 401]
-#             })),
-#             Run({"COUNT": 2, "STRATEGY": "recursive"}, HashedDict({
-#                 fnv1a(Compiler("gcc", "14", "26", ("-O3",))): [200, 203, 201],
-#                 fnv1a(Compiler("clang", "19", "26", ("-O3",))): [420, 353, 401]
-#             }))])]
+        if compiler_hash not in self.tests[test]:
+            self.tests[test][compiler_hash] = []
 
-#     report = Report(SYSTEM_INFO, compilers, tests)
-#     from pprint import pprint
-#     pprint(report)
+        self.tests[test][compiler_hash].append(Run(variables, result, extra_files or []))
+
+    def as_dict(self):
+        return {
+            'file': self.file,
+            'system': self.system,
+            'compilers': {str(key): value for key, value in self.compilers.items()},
+            'tests': {test_name: {str(key): value for key, value in results.items()} for test_name, results in self.tests.items()}
+        }

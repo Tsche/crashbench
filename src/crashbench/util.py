@@ -13,13 +13,15 @@ from typing import Any, Iterable, Optional, TypeVar
 from colorama import Back, Fore, Style
 
 def json_default(thing):
-    with contextlib.suppress(TypeError):
-        return asdict(thing)
-
     if isinstance(thing, datetime):
         return thing.isoformat(timespec="microseconds")
     elif isinstance(thing, Path):
         return str(thing)
+    elif hasattr(thing, "as_dict"):
+        return thing.as_dict()
+
+    with contextlib.suppress(TypeError):
+        return asdict(thing)
 
     raise TypeError(f"object of type {type(thing).__name__} not json serializable")
 
@@ -33,8 +35,8 @@ def fnv1a(data: Any):
     return hash_value
 
 
-def as_json(data: Any):
-    return json.dumps(data, default=json_default)
+def as_json(data: Any, indent: None | str | int=None):
+    return json.dumps(data, default=json_default, indent=indent)
 
 def to_base58(number: int):
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"

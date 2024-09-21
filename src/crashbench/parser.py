@@ -569,14 +569,13 @@ class ParseContext:
 
         self.variables.add(variable_name, value)
 
-    def parse_attr_node(self, node: Node):
+    def parse_attributed_statement(self, node: Node):
         assert node.type == "attributed_statement", f"Wrong type: {node.type}"
-        assert node.named_children[-1].type in ("expression_statement", "labeled_statement"), \
-            f"Wrong type: {node.named_children[-1].type}"
 
         remove = False
+        body = node.named_children[-1]
 
-        if node.named_children[-1].type == "expression_statement":
+        if body.type == "expression_statement":
             # regular attribute
             # [[identifier]], [[identifier(foo)]] etc
 
@@ -593,7 +592,7 @@ class ParseContext:
                     assert child.type == "attribute_declaration"
                     remove |= self.parse_attribute(child.named_children[0])
 
-        elif node.named_children[-1].type == "labeled_statement":
+        elif body.type == "labeled_statement":
             # attribute using
             # [[using ident1: ident2]], [[using ident1: ident2, ident3]], [[using ident1: ident2(foo)]] and so on
             assert node.has_error, "Node doesn't have an error. Did tree-sitter-cpp get fixed?"
@@ -620,7 +619,36 @@ class ParseContext:
                     assert not isinstance(fnc, list), "More than one function node found"
                     self.add_variable(name_node, Lambda(name, fnc, self.variables))
                     remove |= True
+
+        elif body.type == "compound_statement":
+            # ie [plot]{}
+            # if name == "plot":
+            #     remove = True
+            #     self.parse_plot_config(body)
+            for _, match in QUERY["plot"].matches(node):
+                if not match:
+                    continue
+                assert match["kind"] is not None
+                assert isinstance(match["kind"], Node), "More than one kind found. Please open an issue."
+
+                kind = (match["kind"].text or b'').decode()
+                assert kind == "plot", f"Kind `{kind}` does not match `plot`. Please open an issue."
+
+                assert match["parameters"] is not None
+                assert isinstance(match["parameters"], Node)
+                self.parse_plot(match["parameters"])
+
+        else:
+            raise ParseError(f"Unexpected node type {body.type}.", body)
         return remove
+
+    def parse_plot(self, node: Node):
+        assert node.type == "compound_statement", f"Unexpected node type {node.type}"
+        for parameter in node.named_children:
+            if parameter.type != "attributed_statement":
+                raise ParseError(f"Unexpected node type {parameter.type} in plot configuration.", parameter)
+
+            print(parameter)
 
     def parse_attribute(self, node: Node):
         assert node.type == "attribute", f"Wrong type: {node.type}"
@@ -638,14 +666,13 @@ class ParseContext:
         # ie [[use(foo)]], [[language("c++")]]
         assert name_node.text, "Invalid text node"
         name = name_node.text.decode()
-
         if name in setting_blacklist:
             # do not attempt to parse builtin attributes
             return False
 
         if argument_list is None:
-            # currently unused => abort if there is no argument list
-            # ie [[foo]]
+            # ie [[foo]];
+            # currently unused
             return False
 
         if name == "use":
@@ -851,7 +878,7 @@ class Test(ParseContext):
         self.skip_list = SkipList(
             Range(attr.start_byte, attr.end_byte)
             for attr in attributes
-            if self.parse_attr_node(attr)
+            if self.parse_attributed_statement(attr)
         )
         self.find_metavar_uses(node["code"])
 
@@ -989,7 +1016,7 @@ class TranslationUnit(ParseContext):
                     attributes = [attributes]
 
                 for attr in attributes:
-                    if self.parse_attr_node(attr):
+                    if self.parse_attributed_statement(attr):
                         self.skip_list.append(Range(attr.start_byte, attr.end_byte))
 
     @cached_property

@@ -51,6 +51,13 @@
                                     (attribute_declaration (attribute name: ((identifier) @using) (.eq? @using "using")))
                                     . (labeled_statement)
                                 ) @attr_node
+
+                                (attributed_statement 
+                                    (attribute_declaration
+                                        (attribute
+                                            name: (identifier) @plot (.match? @plot "^(plot)")))
+                                    . (compound_statement)) @attr_node
+
                                 (_)
                             ]*
                         ) @code)

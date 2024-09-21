@@ -8,6 +8,7 @@ from .runner import Pool, Runner
 from .parser import TranslationUnit, print_tree
 from .sysinfo import SYSTEM_INFO
 from .compilers import COMPILERS, Compiler
+from .util import as_json, fnv1a
 
 @click.command()
 @click.option("--tree-query", type=str, default=None)
@@ -82,8 +83,44 @@ def main(
     # TODO parse cpu pinning argument
     with Pool(num_jobs=jobs, pin_cpu=None) as pool:
         runner = Runner(pool, keep_files=keep)
-        runner.run(file, dry=dry)
+        result = runner.run(file, dry=dry)
 
         if keep:
             print(f"Temporary build files written to: {runner.build_dir.name}")
+
+        path = Path.cwd() / "scratchpad.json"
+        path.write_text(as_json(result, indent=4))
+        draw_plot(result)
     return 0
+
+def draw_plot(report):
+    from bokeh.plotting import figure, show
+    from bokeh.models import ResetTool, CrosshairTool, HoverTool, PanTool, WheelZoomTool
+    from collections import defaultdict
+    for name, runs in report.tests.items():
+        for compiler, results in runs.items():
+            compiler_info = report.compilers[compiler]
+            name = f"{compiler_info.family}-{compiler_info.version['version']} ({compiler_info.version['target']})"
+            plot = figure(width=1200,
+                          height=800,
+                          title=name,
+                          x_axis_label="Count",
+                          y_axis_label="Translation Time (ms)",
+                          active_scroll=WheelZoomTool(),
+                          tools=[ResetTool(), WheelZoomTool(), PanTool(), HoverTool(), CrosshairTool()])
+
+            output: dict = defaultdict(list)
+            for result in results:
+                output[result.variables['STRATEGY']].append((result.variables['COUNT'], result.results.elapsed_ms))
+            output = {label: list(sorted(values)) for label, values in output.items()}
+
+            for label, values in output.items():
+                values = sorted(values)
+                xvals, yvals = zip(*values)
+
+                color = f'#{hex(fnv1a(label))[2:8]}'
+                plot.step(xvals, yvals, mode="center", legend_label=label, color=color)
+                # plot.line(xvals, yvals, legend_label=label, color=color)
+                # plot.scatter(xvals, yvals, fill_color="white", size=8)
+            plot.legend.click_policy = "hide"
+            show(plot)

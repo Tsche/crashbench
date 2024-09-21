@@ -112,6 +112,7 @@ def builtin(fnc=None, repeatable: bool = False):
 
     return Builtin if fnc is None else Builtin(fnc)
 
+
 @dataclass(frozen=True)
 class Option:
     name: str
@@ -119,7 +120,10 @@ class Option:
     separator: Optional[str] = None
 
     def __str__(self):
+        if self.value is None:
+            return self.name
         return f"{self.name}{self.separator or ''}{self.value or ''}"
+
 
 class Compiler(ABC):
     name: str
@@ -128,7 +132,8 @@ class Compiler(ABC):
                  language: Optional[str] = None,
                  options: Optional[dict[str, Option]] = None,
                  assertions: Optional[list[Any]] = None,
-                 warnings: Optional[dict[str, bool]] = None):
+                 warnings: Optional[dict[str, bool]] = None, 
+                 extra_files: Optional[list[str]] = None):
 
         self.path = path
         self.language = language or 'c++'
@@ -138,6 +143,13 @@ class Compiler(ABC):
         self.assertions: list[Any] = assertions.copy() if assertions else []
         self.warnings: dict[str, bool] = warnings.copy() if warnings else {}
         self.expected_return_code: int = 0
+        self.extra_files: list[str] = extra_files or []
+
+    @property
+    def hash(self):
+        return fnv1a((self.path,
+                      self.get_compiler_info(self.path),
+                      self.options))
 
     @property
     def supported_dialects(self):
@@ -145,9 +157,9 @@ class Compiler(ABC):
 
     def copy(self):
         return type(self)(self.path, self.language,
-                          self.options.copy(), self.assertions.copy(), self.warnings.copy())
+                          self.options.copy(), self.assertions.copy(), self.warnings.copy(), self.extra_files.copy())
 
-    def add_option(self, option: str, value: Optional[Any] = None, separator = None):
+    def add_option(self, option: str, value: Optional[Any] = None, separator=None):
         default_separator = getattr(self, "default_option_separator", " ")
         self.options[option] = Option(option, value, default_separator if separator is None else separator)
         return self
@@ -299,11 +311,18 @@ class Compiler(ABC):
     def set_output(self, path: Optional[Path]):
         raise NotImplementedError
 
-    def compile_command(self, source: Path, outpath: Path, test: str, *options, variables: Optional[dict[str, Any]] = None):
-        var_hash = fnv1a(variables)
-        if outpath.is_dir() or (not outpath.exists() and '.' not in outpath.name):
-            self.set_output(outpath / f"{to_base58(var_hash)}.o")
+    def expand_extra_files(self, basepath: Path, name: str):
+        for file in self.extra_files:
+            if "{}" in file:
+                yield basepath / file.format(name)
+            else:
+                yield basepath / file
 
+    def compile_command(self, source: Path, outpath: Path, test: str, *options, variables: Optional[dict[str, Any]] = None):
+        var_hash = to_base58(fnv1a(variables))
+        if outpath.is_dir() or (not outpath.exists() and '.' not in outpath.name):
+            self.set_output(outpath / f"{var_hash}.o")
+        
         return [
             str(self.path),
             str(source),

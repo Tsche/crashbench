@@ -286,13 +286,28 @@ void run(std::index_sequence<Idx...>) {
 
 [[language("c++")]];
 [[standard("c++23")]];
-// [[Clang(standard="c++26")]];
 
 int main() {
   [[benchmark("type_at")]] {
     [[using STRATEGY: list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
-    [[using COUNT:    range(1, 5)]];
+    [[using COUNT:    range(1, 255)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});
+
+    [[plot]]{
+      [[using draw_line: LABEL, step(x=COUNT, y=$.elapsed_ms, legend_label=LABEL, mode="center")]];
+      [[using draw_plot: TITLE, LINES, figure(title=TITLE,
+                                              width=1200, 
+                                              height=800, 
+                                              x_axis_label="Count", 
+                                              y_axis_label="Translation Time (ms)",
+                                              data=LINES)]];
+      
+      [[using LINES: map(draw_line, STRATEGY)]];
+      [[using create_plot: TITLE, draw_plot(TITLE, LINES)]];
+      [[using create_tab: COMPILER, tab(child=create_plot(COMPILER), title=COMPILER)]];
+      [[using TABS: map(create_tab, $.compilers)]];
+      [[draw(TABS)]];
+    }
   }
 }
