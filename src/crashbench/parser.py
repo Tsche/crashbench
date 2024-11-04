@@ -322,18 +322,31 @@ class VariableScope(Scope):
                 # treat initializer lists as lists
                 return [self.parse(child) for child in node.named_children]
 
-            # TODO
-            # case "field_expression":
-            #     argument_node = node.child_by_field_name("argument")
-            #     assert argument_node is not None
-            #     argument = self.parse(argument_node)
+            case "field_expression":
+                argument_node = node.child_by_field_name("argument")
+                assert argument_node is not None
+                argument = self.parse(argument_node)
 
-            #     field_node = node.child_by_field_name("field")
-            #     assert field_node is not None
-            #     assert field_node.text is not None
-            #     field = field_node.text.decode()
+                field_node = node.child_by_field_name("field")
+                assert field_node is not None
+                assert field_node.text is not None
+                field = field_node.text.decode()
+                return PendingCall(getattr, [argument, field], {})
 
-            #     return getattr(argument.evaluate(self) if hasattr(argument, "evaluate") else argument, field)
+            case "subscript_expression":
+                argument_node = node.child_by_field_name("argument")
+                assert argument_node is not None
+                argument = self.parse(argument_node)
+                indices = node.children_by_field_name("indices")[0]
+                args, _ = self.parse_argument_list(indices)
+                if len(args) != 1:
+                    raise ParseError("Multidimensional subscript is not supported.", indices)
+
+                def subscript(collection, key):
+                    # TODO could catch exceptions and enrich with node before rethrowing
+                    return collection[key]
+
+                return PendingCall(subscript, [argument, args[0]], {})
 
             case _:
                 raise ParseError(f"Unexpected node type {node.type}", node)
@@ -368,39 +381,51 @@ class VariableScope(Scope):
 
         return args, kwargs
 
-    def parse_call(self, name_node: Node, argument_list: Node):
-        assert name_node.text is not None, "Invalid text node"
-        name = name_node.text.decode()
-        if (fnc := self.get(name)) is None:
-            raise UndefinedError(f"Undefined function `{name}` used", name_node, name, self, is_function=True)
+    def parse_conditional(self, name: str, argument_list):
+        if name != "if":
+            return None
 
-        if not callable(fnc):
-            raise ParseError(f"`{name}` is not callable.", name_node)
         args, kwargs = self.parse_argument_list(argument_list)
+        if len(kwargs) != 0:
+            raise ParseError("if does not take keyword arguments", get_node(kwargs[0]) or argument_list)
+        if len(args) != 3:
+            raise ParseError("`if` expects exactly 3 positional arguments", argument_list)
+        return Conditional(condition=args[0], true_branch=args[1], false_branch=args[2])
 
-        if name in ("var", "return"):
-            if len(kwargs) != 0:
-                raise ParseError(
-                    f"{name} does not take keyword arguments", get_node(kwargs[0]) or argument_list
-                )
-            if len(args) == 0:
-                raise ParseError(f"{name} needs at least one argument", argument_list)
-            elif len(args) == 1:
-                # special case var(x) and return(x) with arity of one
-                # ie [[metavar::var(12)]]
-                return args[0]
+    def parse_return(self, name: str, argument_list):
+        if name not in ("var", "return"):
+            return None
+        args, kwargs = self.parse_argument_list(argument_list)
+        if len(kwargs) != 0:
+            raise ParseError(f"{name} does not take keyword arguments", get_node(kwargs[0]) or argument_list)
+        if len(args) == 0:
+            raise ParseError(f"{name} needs at least one argument", argument_list)
+        elif len(args) == 1:
+            # special case var(x) and return(x) with arity of one
+            # ie [[metavar::var(12)]]
+            return args[0]
 
-            if name == "return":
-                raise ParseError("return must have exactly one argument", argument_list)
-        elif name == "if":
-            # special case conditionals to allow lazy evaluation
-            if len(kwargs) != 0:
-                raise ParseError("if does not take keyword arguments", get_node(kwargs[0]) or argument_list)
-            if len(args) != 3:
-                raise ParseError("`if` expects exactly 3 positional arguments", argument_list)
-            return Conditional(
-                condition=args[0], true_branch=args[1], false_branch=args[2]
-            )
+        if name == "return":
+            raise ParseError("return must have exactly one argument", argument_list)
+
+    def parse_call(self, name_node: Node, argument_list: Node):
+        if name_node.type == "identifier":
+            assert name_node.text is not None, "Invalid text node"
+            name = name_node.text.decode()
+            if (fnc := self.get(name)) is None:
+                raise UndefinedError(f"Undefined function `{name}` used", name_node, name, self, is_function=True)
+
+            if not callable(fnc):
+                raise ParseError(f"`{name}` is not callable.", name_node)
+
+            # special functions
+            if call := self.parse_return(name, argument_list) or self.parse_conditional(name, argument_list):
+                return call
+
+        else:
+            fnc = self.parse(name_node)
+
+        args, kwargs = self.parse_argument_list(argument_list)
         return PendingCall(fnc, args, kwargs)
 
 
@@ -411,15 +436,16 @@ class Unevaluated(Protocol):
 
 class PendingCall:
     def __init__(self, fnc, args, kwargs):
+        self.__name__ = str(fnc)
         self.fnc = fnc
         self.args = args
         self.kwargs = kwargs
 
     def evaluate(self, scope: VariableScope):
+        fnc = self.fnc.evaluate(scope) if isinstance(self.fnc, Unevaluated) else self.fnc
         positional_args = [scope.evaluate(argument) for argument in self.args]
         keyword_args = {key: scope.evaluate(argument) for key, argument in self.kwargs.items()}
-
-        return self.fnc(*positional_args, **keyword_args)
+        return fnc(*positional_args, **keyword_args)
 
     def __repr__(self):
         args = ", ".join(str(argument) for argument in self.args)
@@ -551,7 +577,7 @@ class SettingScope(VariableScope):
 
 class ParseContext:
     def __init__(self, diagnostics: Diagnostics, variables: Optional[VariableScope], settings: Optional[SettingScope]):
-        self.log = diagnostics
+        self.diagnostics = diagnostics
 
         self.variables: VariableScope = VariableScope(variables)
         self.settings: SettingScope = SettingScope(settings)
@@ -564,8 +590,8 @@ class ParseContext:
             raise ParseError(f"Redefining {variable} is not allowed", variable)
 
         if variable_name in self.variables.enclosing_scope:
-            self.log.emit_warning(f"definition of `{decorated(variable_name, style=Style.BRIGHT)}` shadows global definition",
-                                  variable)
+            self.diagnostics.emit_warning(f"definition of `{decorated(variable_name, style=Style.BRIGHT)}` shadows global definition",
+                                          variable)
 
         self.variables.add(variable_name, value)
 
@@ -644,11 +670,23 @@ class ParseContext:
 
     def parse_plot(self, node: Node):
         assert node.type == "compound_statement", f"Unexpected node type {node.type}"
+        print("PLOT")
+        plot_builtins = {
+            'step': lambda *args, **kwargs: [],
+            'group': lambda *args, **kwargs: [],
+            'by_compiler': lambda *args, **kwargs: [],
+            'by_variable': lambda *args, **kwargs: [],
+            'figure': lambda *args, **kwargs: [],
+            'render': lambda *args, **kwargs: [],
+            'sort': lambda *args, **kwargs: [],
+            }
+        plot_context = ParseContext(self.diagnostics, VariableScope(data=BUILTINS | plot_builtins), None)
+
         for parameter in node.named_children:
             if parameter.type != "attributed_statement":
                 raise ParseError(f"Unexpected node type {parameter.type} in plot configuration.", parameter)
-
-            print(parameter)
+            plot_context.parse_attributed_statement(parameter)
+        print(plot_context.variables)
 
     def parse_attribute(self, node: Node):
         assert node.type == "attribute", f"Wrong type: {node.type}"
@@ -684,7 +722,7 @@ class ParseContext:
             self.parse_import(argument_list)
             return True
 
-        return self.settings.parse_setting(name_node, argument_list, self.log)
+        return self.settings.parse_setting(name_node, argument_list, self.diagnostics)
 
     def parse_use_args(self, argument_list: Node):
         args, kwargs = self.variables.parse_argument_list(argument_list)
@@ -900,7 +938,7 @@ class Test(ParseContext):
             if ident in BUILTINS:
                 # don't mark builtins as used
                 continue
-            
+
             if callable(var):
                 # don't mark functions as used
                 continue

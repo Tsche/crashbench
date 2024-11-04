@@ -90,7 +90,15 @@ def main(
 
         path = Path.cwd() / "scratchpad.json"
         path.write_text(as_json(result, indent=4))
-        draw_plot(result)
+        # for name, runs in result.tests.items():
+        #     for compiler, results in runs.items():
+        #         compiler_info = result.compilers[compiler]
+        #         name = f"{compiler_info.family}-{compiler_info.version['version']} ({compiler_info.version['target']})"
+        #         print(name)
+        #         for r in results:
+        #             print(f"{r.variables['STRATEGY']:<30} {r.results.elapsed_ms}")
+        #     print()
+        # draw_plot(result)
     return 0
 
 def draw_plot(report):
@@ -110,6 +118,7 @@ def draw_plot(report):
                           tools=[ResetTool(), WheelZoomTool(), PanTool(), HoverTool(), CrosshairTool()])
 
             output: dict = defaultdict(list)
+            
             for result in results:
                 output[result.variables['STRATEGY']].append((result.variables['COUNT'], result.results.elapsed_ms))
             output = {label: list(sorted(values)) for label, values in output.items()}

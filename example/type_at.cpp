@@ -290,24 +290,20 @@ void run(std::index_sequence<Idx...>) {
 int main() {
   [[benchmark("type_at")]] {
     [[using STRATEGY: list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
-    [[using COUNT:    range(1, 255)]];
+    [[using COUNT:    range(1, 5)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});
 
-    [[plot]]{
-      [[using draw_line: LABEL, step(x=COUNT, y=$.elapsed_ms, legend_label=LABEL, mode="center")]];
-      [[using draw_plot: TITLE, LINES, figure(title=TITLE,
-                                              width=1200, 
-                                              height=800, 
-                                              x_axis_label="Count", 
-                                              y_axis_label="Translation Time (ms)",
-                                              data=LINES)]];
-      
-      [[using LINES: map(draw_line, STRATEGY)]];
-      [[using create_plot: TITLE, draw_plot(TITLE, LINES)]];
-      [[using create_tab: COMPILER, tab(child=create_plot(COMPILER), title=COMPILER)]];
-      [[using TABS: map(create_tab, $.compilers)]];
-      [[draw(TABS)]];
+    [[plot]] {
+      [[using get_point: result, list(result.variables["COUNT"], result.elapsed_ms)]];
+      [[using plot_steps: x, step(label=x[0], data=map(get_point, x[1]))]];
+      [[using plot_lines: data, map(plot_steps, group(data, by_variable("STRATEGY")))]];
+      [[using draw_plot: x, figure(title=x[0],
+                                   x_axis_label="Count", 
+                                   y_axis_label="Translation Time (ms)", 
+                                   data=plot_lines(x[1]))]];
+      [[using draw_tabs: result, map(draw_plot, group(sort(result, by_variable("COUNT")), by_compiler))]];
+      [[render(draw_tabs)]];
     }
   }
 }
