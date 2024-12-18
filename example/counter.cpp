@@ -223,11 +223,16 @@ template <typename C> void test() {
 int main() {
   [[benchmark("counter")]] {
     [[using STRATEGY: list("determine_range_first", "simple", "search_ranges", "array")]];
-    [[using COUNT: var(0)]];
-    [[use(COUNT)]];
     test<STRATEGY::Counter<int>>();
 
     using counter2 = STRATEGY::Counter<float>;
     static_assert(counter2::next() == 0);
+
+    [[output]] {
+      [[using draw_cell: run, list(run.variables["STRATEGY"], run.results.elapsed_ms)]];
+      [[using draw_rows: compiler, data, dict(list(list("Compiler", str(compiler)), *map(draw_cell, data)))]];
+      [[using draw_table: result, table(data=starmap(draw_rows, group(sort(result, by_variable("STRATEGY")), by_compiler())))]];
+      [[render(draw_table)]];
+    }
   }
 }

@@ -53,9 +53,7 @@
                                 ) @attr_node
 
                                 (attributed_statement 
-                                    (attribute_declaration
-                                        (attribute
-                                            name: (identifier) @plot (.match? @plot "^(plot)")))
+                                    (attribute_declaration)
                                     . (compound_statement)) @attr_node
 
                                 (_)

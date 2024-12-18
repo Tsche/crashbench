@@ -19,7 +19,8 @@ def json_default(thing):
         return str(thing)
     elif hasattr(thing, "as_dict"):
         return thing.as_dict()
-
+    elif hasattr(thing, "to_json"):
+        return thing.to_json()
     with contextlib.suppress(TypeError):
         return asdict(thing)
 
@@ -81,7 +82,7 @@ def remove_duplicates(data: Iterable[Element]) -> list[Element]:
 
 
 @dataclass
-class Result:
+class ExecResult:
     command: str
     returncode: int
     stdout: str
@@ -96,11 +97,11 @@ class Result:
 
     @property
     def elapsed_ms(self):
-        return self.elapsed / 1e6
+        return int(self.elapsed / 1e6)
 
     @property
     def elapsed_s(self):
-        return self.elapsed / 1e9
+        return round(self.elapsed / 1e9, 2)
 
 
 def run(command: list[str] | str, env: Optional[dict[str, str]] = None):
@@ -117,7 +118,7 @@ def run(command: list[str] | str, env: Optional[dict[str, str]] = None):
     )
     end_time = time.monotonic_ns()
 
-    return Result(
+    return ExecResult(
         command_str,
         result.returncode,
         result.stdout,

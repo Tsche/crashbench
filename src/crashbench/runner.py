@@ -15,7 +15,7 @@ import psutil
 
 from .parser import Test, TranslationUnit
 from .compilers import Compiler
-from .util import Result, decorated, fnv1a, run, to_base58
+from .util import ExecResult, decorated, fnv1a, run, to_base58
 
 
 def progressbar_status(shutdown_event: EventClass, output_queue: Queue, total: int):
@@ -37,7 +37,7 @@ class PendingRun:
         self.variables = variables
         self.outpath = outpath
         self.command = configuration.compile_command(source, outpath, test_name, variables=variables)
-        self.result: Optional[Result] = None
+        self.result: Optional[ExecResult] = None
 
     def __str__(self):
         return ' '.join(self.command)
@@ -279,6 +279,7 @@ class Runner:
         try:
             for test in tu.tests:
                 print(f"Running test {decorated(test.name, style=Style.BRIGHT)}")
+                results = []
                 for configuration in test.settings.effective_configurations():
                     print(configuration)
                     compile_commands = list(self.compile_commands(processed_path, test, configuration))
@@ -290,14 +291,16 @@ class Runner:
 
                     for processed in self.run_commands(compile_commands):
                         var_hash = to_base58(fnv1a(processed.variables))
-                        output.add_result(processed.compiler,
-                                          test.name,
-                                          processed.variables,
-                                          processed.result,
-                                          list(processed.compiler.expand_extra_files(processed.outpath, var_hash)))
+                        extra_files = list(processed.compiler.expand_extra_files(processed.outpath, var_hash))
+                        result = report.Result(report.CompilerInfo(processed.compiler), processed.variables, processed.result, extra_files)
+                        results.append(result)
+                        output.add_result(test.name, result)
 
                         # print(f"{run.compiler} {run.variables!s: <50}: {int(run.result.elapsed_ms)}ms")
                         # run.run_assertions()
+
+                for output_action in test.output_actions:
+                    output_action(results)
         except Cancelled as cancellation:
             print(cancellation.explain())
             return

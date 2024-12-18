@@ -3,6 +3,8 @@ import operator
 import itertools
 import functools
 from typing import Iterable
+from itertools import groupby
+
 
 def zip_repeat(data):
     max_length = max(len(sublist) for sublist in data)
@@ -12,14 +14,17 @@ def zip_repeat(data):
 def foldl(func, acc, xs):
     return functools.reduce(func, xs, acc)
 
+
 def flip(func):
     @functools.wraps(func)
     def newfunc(x, y):
         return func(y, x)
     return newfunc
 
+
 def foldr(func, acc, xs):
     return functools.reduce(flip(func), reversed(xs), acc)
+
 
 def var(*args):
     if len(args) == 1:
@@ -29,23 +34,33 @@ def var(*args):
         return args[0]
     return [*args]
 
+
 def prefix_each(text, iterable):
     for element in iterable:
         yield f"{text}{element}"
+
 
 def suffix_each(text, iterable):
     for element in iterable:
         yield f"{element}{text}"
 
+
 def make_list(*args):
     return [*args]
+
 
 def conditional(condition, true_branch, false_branch):
     return true_branch if condition else false_branch
 
+def starmap(func, iterable):
+    for it in iterable:
+        yield func(*it)
+
+def _map(fnc, *args):
+    return list(map(fnc, *args))
 
 BUILTINS = {
-# builtins
+    # builtins
     'any': any,
     'all': all,
     'chr': chr,
@@ -55,13 +70,14 @@ BUILTINS = {
     'len': len,
     'min': min,
     'max': max,
-    'map': map,
+    'map': _map,
+    'starmap': starmap,
     'zip': zip,
     'abs': abs,
     'pow': pow,
     'reversed': reversed,
     'range': range,
-# operator
+    # operator
     'lt': operator.lt,
     'le': operator.le,
     'eq': operator.eq,
@@ -90,7 +106,7 @@ BUILTINS = {
     'contains': operator.contains,
     'countOf': operator.countOf,
     'indexOf': operator.indexOf,
-# itertools
+    # itertools
     'count': itertools.count,
     'cycle': itertools.cycle,
     'repeat': itertools.repeat,
@@ -109,19 +125,20 @@ BUILTINS = {
     'permutations': itertools.permutations,
     'combinations': itertools.combinations,
     'combinations_with_replacement': itertools.combinations_with_replacement,
-# functools
+    # functools
     'bind': functools.partial,
-# custom
+    # custom
     'zip_repeat': zip_repeat,
     'foldl': foldl,
     'foldr': foldr,
     'var': var,
 
     'str': str,
-    'int_': int,
+    'int': int,
     'list': make_list,
-    'float_': float,
-    'bool_': bool,
+    'float': float,
+    'bool': bool,
+    'dict': dict,
 
     'split': str.split,
     'join': str.join,
@@ -162,3 +179,4 @@ UNARY_OPERATORS = {
     '~': operator.invert,
     'compl': operator.invert
 }
+

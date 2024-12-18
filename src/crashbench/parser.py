@@ -15,6 +15,7 @@ from colorama import Fore, Style
 from tree_sitter import Language, Node, Parser
 
 from .builtins import BINARY_OPERATORS, BUILTINS, UNARY_OPERATORS
+from .output.builtins import OUTPUT_BUILTINS
 from .compilers import builtin, COMPILERS, COMPILER_BUILTINS, is_valid_compiler, Compiler
 from .exceptions import ParseError, UndefinedError
 from .util import proxy, decorated
@@ -263,7 +264,7 @@ class VariableScope(Scope):
 
                 return self.parse_call(name_node, argument_list)
 
-            case type_ if type_ in ("identifier", "namespace_identifier", "type_identifier"):
+            case type_ if type_ in ("identifier", "namespace_identifier", "type_identifier", "primitive_type"):
                 assert node.text is not None, "Invalid text node"
                 ident = node.text.decode()
                 return Variable(ident, node)
@@ -374,6 +375,26 @@ class VariableScope(Scope):
                 rhs = child.child_by_field_name("right")
                 assert rhs is not None, "Could not get rhs of binary expression"
                 kwargs[key] = self.parse(rhs)
+
+            elif child.type == "pointer_expression":
+                doublestar = False
+                arg = child.child_by_field_name("argument")
+                assert arg
+                if arg.type == "pointer_expression":
+                    doublestar = True
+                    assert arg
+                    arg = arg.child_by_field_name("argument")
+                    assert arg
+
+                parsed = self.parse(arg)
+                assert parsed is not None
+                if evaluated := parsed.evaluate(self):
+                    for item in evaluated:
+                        if doublestar:
+                            kwargs[item[0]] = item[1]
+                        else:
+                            args.append(item)
+
             elif kwargs:
                 raise ParseError("Positional arguments may not follow keyword arguments", child)
             else:
@@ -524,7 +545,7 @@ class SettingScope(VariableScope):
             {compiler.name: CompilerSetting(compiler) for compiler in COMPILERS} if parent is None else
             {key: settings.copy() for key, settings in parent.compilers.items()})
 
-    def parse_setting(self, name_node: Node, argument_list: Node, log: Diagnostics):
+    def parse_statement(self, name_node: Node, argument_list: Node, log: Diagnostics):
         assert name_node.text is not None, "Invalid text node"
         name = name_node.text.decode()
         args, kwargs = self.parse_argument_list(argument_list)
@@ -549,7 +570,8 @@ class SettingScope(VariableScope):
                 continue
             compiler.add(name, (args, kwargs))
             found = True
-
+        if not found:
+            log.emit_warning(f"Could not find setting {name}")
         return found
 
     def run_builtin(self, compiler: type[Compiler], name: str, *args, **kwargs) -> Any:
@@ -575,12 +597,26 @@ class SettingScope(VariableScope):
     def language(self): ...
 
 
+class OutputScope(VariableScope):
+    def parse_statement(self, name_node: Node, argument_list: Node, log: Diagnostics):
+        assert name_node.type == "identifier" and name_node.text
+        name = name_node.text.decode()
+        if name == "render":
+            args, kwargs = self.parse_argument_list(argument_list)
+            for arg in args:
+                assert isinstance(arg, Variable)
+                self.add(arg.name, arg)
+            return True
+        return False
+
+
 class ParseContext:
-    def __init__(self, diagnostics: Diagnostics, variables: Optional[VariableScope], settings: Optional[SettingScope]):
+    def __init__(self, diagnostics: Diagnostics, variables: Optional[VariableScope] = None, settings: Optional[SettingScope | OutputScope] = None, output_actions: Optional[list] = None):
         self.diagnostics = diagnostics
 
-        self.variables: VariableScope = VariableScope(variables)
-        self.settings: SettingScope = SettingScope(settings)
+        self.variables: VariableScope = variables or VariableScope()
+        self.settings: Optional[SettingScope | OutputScope] = settings
+        self.output_actions: list[Lambda] = output_actions or []
         self.used: set[Variable] = set()
 
     def add_variable(self, variable: Node, value: Any):
@@ -600,7 +636,6 @@ class ParseContext:
 
         remove = False
         body = node.named_children[-1]
-
         if body.type == "expression_statement":
             # regular attribute
             # [[identifier]], [[identifier(foo)]] etc
@@ -648,45 +683,39 @@ class ParseContext:
 
         elif body.type == "compound_statement":
             # ie [plot]{}
-            # if name == "plot":
-            #     remove = True
-            #     self.parse_plot_config(body)
-            for _, match in QUERY["plot"].matches(node):
+            for _, match in QUERY["output"].matches(node):
                 if not match:
                     continue
                 assert match["kind"] is not None
                 assert isinstance(match["kind"], Node), "More than one kind found. Please open an issue."
 
                 kind = (match["kind"].text or b'').decode()
-                assert kind == "plot", f"Kind `{kind}` does not match `plot`. Please open an issue."
+                assert kind == "output", f"Kind `{kind}` does not match `output`. Please open an issue."
 
                 assert match["parameters"] is not None
                 assert isinstance(match["parameters"], Node)
-                self.parse_plot(match["parameters"])
+                self.parse_output(match["parameters"])
 
         else:
             raise ParseError(f"Unexpected node type {body.type}.", body)
         return remove
 
-    def parse_plot(self, node: Node):
+    def parse_output(self, node: Node):
         assert node.type == "compound_statement", f"Unexpected node type {node.type}"
-        print("PLOT")
-        plot_builtins = {
-            'step': lambda *args, **kwargs: [],
-            'group': lambda *args, **kwargs: [],
-            'by_compiler': lambda *args, **kwargs: [],
-            'by_variable': lambda *args, **kwargs: [],
-            'figure': lambda *args, **kwargs: [],
-            'render': lambda *args, **kwargs: [],
-            'sort': lambda *args, **kwargs: [],
-            }
-        plot_context = ParseContext(self.diagnostics, VariableScope(data=BUILTINS | plot_builtins), None)
+        plot_context = ParseContext(self.diagnostics, VariableScope(data=BUILTINS | OUTPUT_BUILTINS), settings=OutputScope())
 
         for parameter in node.named_children:
-            if parameter.type != "attributed_statement":
+            if parameter.type == "comment":
+                continue
+            elif parameter.type != "attributed_statement":
                 raise ParseError(f"Unexpected node type {parameter.type} in plot configuration.", parameter)
+
             plot_context.parse_attributed_statement(parameter)
-        print(plot_context.variables)
+        assert plot_context.settings
+        for action in plot_context.settings.values():
+            assert isinstance(action, Unevaluated)
+            evaluated = action.evaluate(plot_context.variables)
+            self.output_actions.append(evaluated)
 
     def parse_attribute(self, node: Node):
         assert node.type == "attribute", f"Wrong type: {node.type}"
@@ -697,9 +726,9 @@ class ParseContext:
         if prefix := node.child_by_field_name("prefix"):
             return self.parse_metavar(prefix, name_node, argument_list)
 
-        return self.parse_setting(name_node, argument_list)
+        return self.parse_statement(name_node, argument_list)
 
-    def parse_setting(self, name_node: Node, argument_list: Optional[Node]):
+    def parse_statement(self, name_node: Node, argument_list: Optional[Node]):
         # no namespace prefix => setting or weak builtin
         # ie [[use(foo)]], [[language("c++")]]
         assert name_node.text, "Invalid text node"
@@ -722,7 +751,9 @@ class ParseContext:
             self.parse_import(argument_list)
             return True
 
-        return self.settings.parse_setting(name_node, argument_list, self.diagnostics)
+        if self.settings is not None:
+            return self.settings.parse_statement(name_node, argument_list, self.diagnostics)
+        return False
 
     def parse_use_args(self, argument_list: Node):
         args, kwargs = self.variables.parse_argument_list(argument_list)
@@ -798,7 +829,7 @@ class ParseContext:
             # are disallowed, do not attempt to parse them
             return False
 
-        if is_valid_compiler(varname):
+        if isinstance(self.settings, SettingScope) and is_valid_compiler(varname):
             # special case - prefix is a compiler
             # => this isn't a metavar, it's a compiler-specific setting or function
             if argument_list is None:
@@ -827,10 +858,7 @@ class Lambda:
         self.scope = scope.copy()
         self.scope.add(self.name, self)
 
-        name_node = fnc.child_by_field_name("function")
-        argument_list = fnc.child_by_field_name("arguments")
-
-        self.function = self.scope.parse_call(name_node, argument_list)
+        self.function = fnc
 
     def parse_nested_comma(self, node: Node):
         assert node.type == "comma_expression"
@@ -850,7 +878,7 @@ class Lambda:
 
     @property
     def definition(self):
-        return f"{self.name} {', '.join(arg.text.decode() for arg in self.arg_names)} = {self.function!s}"
+        return f"{self.name} {', '.join(arg.text.decode() for arg in self.arg_names)} = {self.function.text}"
 
     def __repr__(self):
         return self.name
@@ -865,8 +893,12 @@ class Lambda:
             assert name.text is not None, "Invalid text node"
             arg_name: str = name.text.decode()
             function_scope.add(arg_name, self.scope.evaluate(value))
+        # print(function_scope.data)
+        name_node = self.function.child_by_field_name("function")
+        argument_list = self.function.child_by_field_name("arguments")
+        fnc = function_scope.parse_call(name_node, argument_list)
 
-        return self.function.evaluate(function_scope)
+        return fnc.evaluate(function_scope)
 
 
 @dataclass
@@ -911,7 +943,7 @@ class Test(ParseContext):
         if isinstance(attributes, Node):
             attributes = [attributes]
 
-        # note that parse_attr_node has side effects!
+        # note that parse_attributed_statement has side effects!
         # TODO
         self.skip_list = SkipList(
             Range(attr.start_byte, attr.end_byte)
@@ -1003,7 +1035,7 @@ class TranslationUnit(ParseContext):
         self.source_path = source_path
         self.log: Diagnostics = logger or Diagnostics(self.raw_source.decode("utf-8"), source_path)
         # builtins shall be treated as globals
-        super().__init__(self.log, VariableScope(data=BUILTINS), None)
+        super().__init__(self.log, VariableScope(data=BUILTINS), SettingScope())
 
         self.tests: list[Test] = []
         # TODO

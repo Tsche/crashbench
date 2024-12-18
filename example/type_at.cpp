@@ -290,20 +290,27 @@ void run(std::index_sequence<Idx...>) {
 int main() {
   [[benchmark("type_at")]] {
     [[using STRATEGY: list("recursive", "inheritance1", "inheritance2", "voidptr", "ignored", "nested", "paging", "builtin" /*, "cpp26"*/)]];
-    [[using COUNT:    range(1, 5)]];
+    [[using COUNT:    range(1, 255)]];
 
     run<STRATEGY::get>(std::make_index_sequence<COUNT>{});
 
-    [[plot]] {
-      [[using get_point: result, list(result.variables["COUNT"], result.elapsed_ms)]];
-      [[using plot_steps: x, step(label=x[0], data=map(get_point, x[1]))]];
-      [[using plot_lines: data, map(plot_steps, group(data, by_variable("STRATEGY")))]];
-      [[using draw_plot: x, figure(title=x[0],
-                                   x_axis_label="Count", 
-                                   y_axis_label="Translation Time (ms)", 
-                                   data=plot_lines(x[1]))]];
-      [[using draw_tabs: result, map(draw_plot, group(sort(result, by_variable("COUNT")), by_compiler))]];
-      [[render(draw_tabs)]];
+    [[output]] {
+      // [[using get_point: run, list(run.variables["COUNT"], run.results.elapsed_ms)]];
+      // [[using plot_steps: strategy, data, step(label=strategy, data=map(get_point, data))]];
+      // [[using plot_lines: data, list(*starmap(plot_steps, group(data, by_variable("STRATEGY"))))]];
+      // [[using draw_plot: compiler, data, figure(title=str(compiler),
+      //                              x_axis_label="Count", 
+      //                              y_axis_label="Translation Time (ms)", 
+      //                              data=plot_lines(data))]];
+      // [[using draw_tabs: result, starmap(draw_plot, group(sort(result, by_variable("COUNT")), by_compiler()))]];
+      // [[render(draw_tabs)]];
+
+
+      [[using draw_cell: run, list(run.variables["STRATEGY"], run.results.elapsed_ms)]];
+      [[using draw_rows: count, data, dict(list(list("Count", count), *map(draw_cell, data)))]];
+      [[using draw_table: compiler, result, table(title=str(compiler), data=starmap(draw_rows, group(sort(result, by_variable("STRATEGY")), by_variable("COUNT"))))]];
+      [[using tables: result, starmap(draw_table, group(result, by_compiler()))]];
+      [[render(tables)]];
     }
   }
 }
